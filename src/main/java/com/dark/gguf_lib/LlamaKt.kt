@@ -6,6 +6,7 @@ import com.dark.gguf_lib.models.ModelInfo
 import com.dark.gguf_lib.models.StreamCallback
 import com.dark.gguf_lib.toolcalling.ToolCallingConfig
 import com.dark.gguf_lib.toolcalling.ToolDefinitionBuilder
+import com.dark.gguf_lib.toolcalling.AnnotatedToolExecutor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -67,10 +68,21 @@ class LlamaKt private constructor(
             contextSize = config.contextSize,
             threads = config.threads,
             flashAttn = config.flashAttn,
+            backend = config.backend,
             cacheTypeK = config.cacheTypeK,
             cacheTypeV = config.cacheTypeV,
         )
         if (!loaded) return false
+
+        // Load vision model if configured
+        config.visionModelPath?.let {
+            engine.loadVisionModel(it)
+        }
+
+        // Load draft model if configured
+        config.draftModelPath?.let {
+            engine.loadDraftModel(it, config.draftModelThreads)
+        }
 
         // Apply sampling config
         config.samplingConfig?.let { s ->
@@ -122,12 +134,17 @@ class LlamaKt private constructor(
         return ModelInfo.fromJson(json)
     }
 
-    /**
-     * Single-turn chat — shortcut for generateFlow with auto-initialization.
-     */
     fun chat(prompt: String, maxTokens: Int = 4096): Flow<GenerationEvent> {
         ensureInitialized()
         return engine.generateFlow(prompt, maxTokens)
+    }
+
+    /**
+     * Multimodal generation — stream response for text prompt + image input.
+     */
+    fun chatWithImage(prompt: String, imageBytes: ByteArray, maxTokens: Int = 4096): Flow<GenerationEvent> {
+        ensureInitialized()
+        return engine.generateFlowWithImage(prompt, imageBytes, maxTokens)
     }
 
     /**
@@ -185,10 +202,115 @@ class LlamaKt private constructor(
     /** Release all native resources. */
     override fun close() {
         if (initialized) {
+            engine.unloadVisionModel()
+            engine.unloadDraftModel()
             engine.unload()
             initialized = false
         }
     }
+
+    /**
+     * Automated agentic chat flow with annotation-driven tools (@Tool).
+     *
+     * Automatically registers tools from the provided handler instances,
+     * intercepts tool calling requests from the model, executes the corresponding Kotlin
+     * functions via reflection, feeds results back to the LLM context, and streams the
+     * final text seamlessly to the subscriber.
+     *
+     * @param prompt The user's input/query
+     * @param toolHandlers List of object instances containing @Tool annotated methods
+     * @param maxTokens Maximum tokens to generate
+     */
+    fun chatWithTools(
+        prompt: String,
+        toolHandlers: List<Any>,
+        maxTokens: Int = 4096,
+    ): Flow<GenerationEvent> = callbackFlow {
+        ensureInitialized()
+
+        val toolExecutor = AnnotatedToolExecutor()
+        val definitions = mutableListOf<ToolDefinitionBuilder.ToolDefinition>()
+        
+        toolHandlers.forEach { handler ->
+            definitions.addAll(toolExecutor.registerTools(handler))
+        }
+
+        // Enable tool calling on the engine for this turn
+        if (definitions.isNotEmpty()) {
+            engine.enableToolCalling(definitions)
+        }
+
+        val job = launch(Dispatchers.IO) {
+            val cb = object : StreamCallback {
+                override fun onToken(token: String) {
+                    trySend(GenerationEvent.Token(token))
+                }
+
+                override fun onToolCall(name: String, argsJson: String) {
+                    trySend(GenerationEvent.ToolCall(name, argsJson))
+                    
+                    // 1. Execute tool via annotation reflection
+                    val result = toolExecutor.execute(name, argsJson)
+                    
+                    // 2. Feed tool result back to the model context automatically
+                    launch {
+                        val toolResponsePrompt = "Tool $name returned: $result"
+                        engine.generateFlow(toolResponsePrompt, maxTokens).collect { event ->
+                            trySend(event)
+                        }
+                    }
+                }
+
+                override fun onDone() {
+                    trySend(GenerationEvent.Done)
+                    channel.close()
+                }
+
+                override fun onError(message: String) {
+                    trySend(GenerationEvent.Error(message))
+                    channel.close()
+                }
+
+                override fun onProgress(progress: Float) {
+                    trySend(GenerationEvent.Progress(progress))
+                }
+
+                override fun onMetrics(
+                    tps: Float, ttftMs: Float, totalMs: Float,
+                    tokensEvaluated: Int, tokensPredicted: Int,
+                    modelMB: Float, ctxMB: Float, peakMB: Float, memPct: Float,
+                ) {
+                    trySend(GenerationEvent.Metrics(
+                        DecodingMetrics(tps, ttftMs, totalMs, tokensEvaluated, tokensPredicted, modelMB, ctxMB, peakMB, memPct)
+                    ))
+                }
+            }
+            GGUFNativeLib.nativeGenerateStream(prompt, maxTokens, cb)
+        }
+
+        awaitClose { 
+            job.cancel()
+            engine.clearTools()
+            toolExecutor.clear()
+            GGUFNativeLib.nativeStopGeneration() 
+        }
+    }
+
+    /**
+     * Purge model active weight pages from RAM back to storage.
+     * Keeps JNI handles alive, allowing near-instant wake-up.
+     */
+    fun purgeRAM(): Boolean = GGUFNativeLib.nativePurgeModelRAM()
+
+    /**
+     * Eagerly fault-in purged weight pages back to active RAM.
+     */
+    fun reloadRAM(): Boolean = GGUFNativeLib.nativeReloadModelRAM()
+
+    /**
+     * Shrinks context to windowSize by evicting older sequences but keeping system tokens intact.
+     */
+    fun applySlidingWindow(windowSize: Int): Boolean = raw.applySlidingWindow(windowSize)
 
     private fun ensureInitialized() {
         if (!initialized) {
@@ -227,6 +349,7 @@ class LlamaKt private constructor(
         var contextSize: Int = 4096,
         var threads: Int = 0,
         var flashAttn: Boolean = false,
+        var backend: InferenceBackend = InferenceBackend.CPU,
         var cacheTypeK: String = "q8_0",
         var cacheTypeV: String = "q8_0",
         var systemPrompt: String? = null,
@@ -238,6 +361,9 @@ class LlamaKt private constructor(
         var speculativeNDraft: Int = 4,
         var speculativeNgram: Int = 4,
         var promptCacheDir: String? = null,
+        var visionModelPath: String? = null,
+        var draftModelPath: String? = null,
+        var draftModelThreads: Int = 0,
     )
 
     class Builder {
@@ -248,10 +374,13 @@ class LlamaKt private constructor(
         fun contextSize(size: Int) { config.contextSize = size }
         fun threads(count: Int) { config.threads = count }
         fun flashAttention(enabled: Boolean = true) { config.flashAttn = enabled }
+        fun backend(b: InferenceBackend) { config.backend = b }
         fun cacheType(k: String, v: String = k) { config.cacheTypeK = k; config.cacheTypeV = v }
         fun systemPrompt(prompt: String) { config.systemPrompt = prompt }
         fun chatTemplate(template: String) { config.chatTemplate = template }
         fun promptCacheDir(dir: String) { config.promptCacheDir = dir }
+        fun visionModel(path: String) { config.visionModelPath = path }
+        fun draftModel(path: String, threads: Int = 0) { config.draftModelPath = path; config.draftModelThreads = threads }
 
         fun sampling(block: SamplingBuilder.() -> Unit) {
             config.samplingConfig = SamplingBuilder().apply(block).build()

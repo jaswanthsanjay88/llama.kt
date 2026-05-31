@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.dark.gguf_lib"
     compileSdk = 34
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         minSdk = 24

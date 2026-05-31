@@ -172,6 +172,57 @@ class RAGEngine : AutoCloseable {
         return GGUFNativeLib.nativeRagInfo()
     }
 
+    /**
+     * Re-rank a retrieved list of chunks using an on-device Cross-Encoder model.
+     * Maps to native Cross-Encoder JNI layers.
+     */
+    suspend fun rerank(query: String, results: List<RAGResult>): List<RAGResult> = withContext(Dispatchers.IO) {
+        if (!created || results.isEmpty()) return@withContext results
+        
+        val serializedResult = GGUFNativeLib.nativeRagRerank(query, results.map { it.text }.toTypedArray()) ?: return@withContext results.sortedByDescending { it.score }
+        
+        try {
+            val arr = JSONArray(serializedResult)
+            results.mapIndexed { idx, res ->
+                val newScore = arr.getDouble(idx).toFloat()
+                res.copy(score = newScore)
+            }.sortedByDescending { it.score }
+        } catch (e: Exception) {
+            results.sortedByDescending { it.score }
+        }
+    }
+
+    /**
+     * Semantic Chunker - Splits long documents into chunks dynamically
+     * based on natural sentence and paragraph boundaries rather than static character sizes,
+     * maintaining high context preservation.
+     */
+    object SemanticChunker {
+        fun chunk(text: String, maxChunkSize: Int = 1000, sentenceOverlap: Int = 2): List<String> {
+            val sentences = text.split(Regex("(?<=[.!?])\\s+"))
+            val chunks = mutableListOf<String>()
+            val currentChunk = StringBuilder()
+
+            for (sentence in sentences) {
+                if (currentChunk.length + sentence.length > maxChunkSize && currentChunk.isNotEmpty()) {
+                    chunks.add(currentChunk.toString().trim())
+                    currentChunk.clear()
+                    
+                    val idx = sentences.indexOf(sentence)
+                    val overlapStart = maxOf(0, idx - sentenceOverlap)
+                    for (i in overlapStart until idx) {
+                        currentChunk.append(sentences[i]).append(" ")
+                    }
+                }
+                currentChunk.append(sentence).append(" ")
+            }
+            if (currentChunk.isNotEmpty()) {
+                chunks.add(currentChunk.toString().trim())
+            }
+            return chunks
+        }
+    }
+
     override fun close() {
         if (created) {
             GGUFNativeLib.nativeReleaseRagEngine()

@@ -69,10 +69,11 @@ class GGMLEngine {
         contextSize: Int = 4096,
         threads: Int = 0,
         flashAttn: Boolean = false,
+        backend: InferenceBackend = InferenceBackend.CPU,
         cacheTypeK: String = "q8_0",
         cacheTypeV: String = "q8_0",
     ): Boolean {
-        loaded = GGUFNativeLib.nativeLoadModel(path, contextSize, threads, flashAttn, cacheTypeK, cacheTypeV)
+        loaded = GGUFNativeLib.nativeLoadModel(path, contextSize, threads, flashAttn, backend.value, cacheTypeK, cacheTypeV)
         return loaded
     }
 
@@ -84,10 +85,11 @@ class GGMLEngine {
         contextSize: Int = 4096,
         threads: Int = 0,
         flashAttn: Boolean = false,
+        backend: InferenceBackend = InferenceBackend.CPU,
         cacheTypeK: String = "q8_0",
         cacheTypeV: String = "q8_0",
     ): Boolean {
-        loaded = GGUFNativeLib.nativeLoadModelFromFd(fd, contextSize, threads, flashAttn, cacheTypeK, cacheTypeV)
+        loaded = GGUFNativeLib.nativeLoadModelFromFd(fd, contextSize, threads, flashAttn, backend.value, cacheTypeK, cacheTypeV)
         return loaded
     }
 
@@ -100,12 +102,13 @@ class GGMLEngine {
         contextSize: Int = 4096,
         threads: Int = 0,
         flashAttn: Boolean = false,
+        backend: InferenceBackend = InferenceBackend.CPU,
         cacheTypeK: String = "q8_0",
         cacheTypeV: String = "q8_0",
     ): Boolean {
         val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return false
         return try {
-            loadFromFd(pfd.fd, contextSize, threads, flashAttn, cacheTypeK, cacheTypeV)
+            loadFromFd(pfd.fd, contextSize, threads, flashAttn, backend, cacheTypeK, cacheTypeV)
         } finally {
             pfd.close()
         }
@@ -335,6 +338,13 @@ class GGMLEngine {
     // get current KV cache utilization (0.0 = empty, 1.0 = full)
     fun getContextUsage(): Float = if (loaded) GGUFNativeLib.nativeGetContextUsage() else 0f
 
+    /**
+     * Apply sliding window KV cache eviction.
+     * Shrinks context to windowSize by evicting older sequences but keeping system tokens intact.
+     */
+    fun applySlidingWindow(windowSize: Int): Boolean =
+        loaded && GGUFNativeLib.nativeApplySlidingWindow(windowSize)
+
     // ---- Optimization Controls ----
 
     /**
@@ -359,6 +369,47 @@ class GGMLEngine {
      * Called automatically during load(), but can be re-invoked manually.
      */
     fun warmUp(): Boolean = if (loaded) GGUFNativeLib.nativeWarmUp() else false
+
+    // ---- Multimodal Vision (LLaVA/CLIP) ----
+
+    fun loadVisionModel(clipPath: String): Boolean {
+        return loaded && GGUFNativeLib.nativeLoadVisionModel(clipPath)
+    }
+
+    fun unloadVisionModel() {
+        if (loaded) {
+            GGUFNativeLib.nativeReleaseVisionModel()
+        }
+    }
+
+    fun generateFlowWithImage(prompt: String, imageBytes: ByteArray, maxTokens: Int = 4096): Flow<GenerationEvent> = callbackFlow {
+        val job = launch(Dispatchers.IO) {
+            val cb = object : StreamCallback {
+                override fun onToken(token: String) { trySend(GenerationEvent.Token(token)) }
+                override fun onToolCall(name: String, argsJson: String) { trySend(GenerationEvent.ToolCall(name, argsJson)) }
+                override fun onDone() { trySend(GenerationEvent.Done); channel.close() }
+                override fun onError(message: String) { trySend(GenerationEvent.Error(message)); channel.close() }
+                override fun onProgress(progress: Float) { trySend(GenerationEvent.Progress(progress)) }
+                override fun onMetrics(tps: Float, ttftMs: Float, totalMs: Float, tokensEvaluated: Int, tokensPredicted: Int, modelMB: Float, ctxMB: Float, peakMB: Float, memPct: Float) {
+                    trySend(GenerationEvent.Metrics(DecodingMetrics(tps, ttftMs, totalMs, tokensEvaluated, tokensPredicted, modelMB, ctxMB, peakMB, memPct)))
+                }
+            }
+            GGUFNativeLib.nativeGenerateStreamWithImage(prompt, imageBytes, maxTokens, cb)
+        }
+        awaitClose { job.cancel(); GGUFNativeLib.nativeStopGeneration() }
+    }
+
+    // ---- Speculative Decoding (Draft Model) ----
+
+    fun loadDraftModel(path: String, nThreads: Int = 0): Boolean {
+        return loaded && GGUFNativeLib.nativeLoadDraftModel(path, nThreads)
+    }
+
+    fun unloadDraftModel() {
+        if (loaded) {
+            GGUFNativeLib.nativeReleaseDraftModel()
+        }
+    }
 
     // ---- Device Tier ----
 
@@ -392,6 +443,13 @@ class GGMLEngine {
 }
 
 // ---- Data classes ----
+
+enum class InferenceBackend(val value: Int) {
+    CPU(0),
+    GPU_VULKAN(1),
+    GPU_OPENCL(2),
+    NPU_QNN(3)
+}
 
 enum class DeviceTier { LOW_END, MID_RANGE, HIGH_END }
 

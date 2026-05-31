@@ -19,15 +19,28 @@ object GGUFNativeLib {
 
     external fun nativeLoadModel(
         path: String, nCtx: Int, nThreads: Int,
-        flashAttn: Boolean, cacheTypeK: String, cacheTypeV: String
+        flashAttn: Boolean, backend: Int, cacheTypeK: String, cacheTypeV: String
     ): Boolean
 
     external fun nativeLoadModelFromFd(
         fd: Int, nCtx: Int, nThreads: Int,
-        flashAttn: Boolean, cacheTypeK: String, cacheTypeV: String
+        flashAttn: Boolean, backend: Int, cacheTypeK: String, cacheTypeV: String
     ): Boolean
 
     external fun nativeRelease()
+
+    // ---- Multimodal Vision Engine ----
+
+    external fun nativeLoadVisionModel(clipPath: String): Boolean
+    external fun nativeReleaseVisionModel()
+    external fun nativeGenerateStreamWithImage(
+        prompt: String, imageBytes: ByteArray, maxTokens: Int, callback: StreamCallback
+    ): Boolean
+
+    // ---- Speculative Draft Model ----
+
+    external fun nativeLoadDraftModel(path: String, nThreads: Int): Boolean
+    external fun nativeReleaseDraftModel()
 
     // ---- Model Info ----
 
@@ -124,4 +137,20 @@ object GGUFNativeLib {
     external fun nativeRagInfo(): String?
 
     external fun nativeReleaseRagEngine()
+
+    // ---- Audio Transcribing (whisper.cpp) ----
+
+    external fun nativeLoadAudioModel(path: String): Boolean
+    external fun nativeReleaseAudioModel()
+    external fun nativeTranscribeAudio(pcmBytes: ByteArray): String?
+
+    // ---- Dynamic RAM Swapping ----
+
+    external fun nativePurgeModelRAM(): Boolean
+    external fun nativeReloadModelRAM(): Boolean
+
+    // ---- Sliding KV Cache & Reranking ----
+
+    external fun nativeApplySlidingWindow(windowSize: Int): Boolean
+    external fun nativeRagRerank(query: String, docs: Array<String>): String?
 }

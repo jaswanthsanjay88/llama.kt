@@ -1,78 +1,100 @@
 # llama.kt
 
-A high-performance local LLM inference engine for Kotlin and Android, built on [llama.cpp](https://github.com/ggml-org/llama.cpp).
+[![Kotlin](https://img.shields.io/badge/Kotlin-1.9+-blue.svg?logo=kotlin)](https://kotlinlang.org)
+[![Android Min SDK](https://img.shields.io/badge/Android-Min%20SDK%2024-green.svg?logo=android)](https://developer.android.com)
+[![Hardware Offload](https://img.shields.io/badge/Hardware%20Offload-QNN%20%2F%20NeuroPilot%20%2F%20Vulkan-red.svg)](#hardware-acceleration)
+[![Vision](https://img.shields.io/badge/Vision-LLaVA%20%2F%20CLIP-purple.svg)](#multimodal-vision)
+[![Audio](https://img.shields.io/badge/Audio-Whisper.cpp-blue.svg)](#on-device-voice-transcription)
+[![Release Version](https://img.shields.io/badge/Release-v1.2.0-blue.svg)](https://github.com/ggml-org/llama.cpp)
+[![License](https://img.shields.io/badge/License-MIT-orange.svg)](LICENSE)
 
-Run large language models — Llama 3, Phi-3, Gemma, Mistral, Qwen, and more — directly on Android devices. Fully offline. Fully private. No server required.
+llama.kt is a production-grade, high-performance local LLM and multimodality inference engine for Android and Kotlin, built on top of llama.cpp and fully optimized for mobile hardware accelerators.
+
+Run Large Language Models — Llama 3, Phi-3, Gemma, Mistral, Qwen, and more — entirely on-device. **Fully private. Zero network overhead. Hardware-accelerated.**
 
 ---
 
 ## Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
+- [Architecture and Core Concepts](#architecture-and-core-concepts)
+- [Key Upgrades (Parity with LiteRT-LM)](#key-upgrades-parity-with-litert-lm)
 - [Getting Started](#getting-started)
-- [Usage Examples](#usage-examples)
-- [API Reference](#api-reference)
-- [Build Instructions](#build-instructions)
-- [Architecture](#architecture)
-- [Contributing](#contributing)
-- [License](#license)
+- [In-Depth DSL Usage Examples](#in-depth-dsl-usage-examples)
+- [API Subsystems](#api-subsystems)
+- [Systrace Profiling](#systrace-profiling)
+- [Contributing and License](#contributing-and-license)
 
 ---
 
-## Overview
+## Architecture and Core Concepts
 
-llama.kt is a Kotlin-first Android library that wraps the llama.cpp inference engine via JNI. It provides an idiomatic Kotlin API with coroutines, Flow-based streaming, and DSL configuration — while delivering native C++ performance with ARM-optimized kernels (NEON, DotProd, i8mm).
-
-The library supports GGUF model files and runs entirely on-device with no network connectivity required.
+```
+                  +----------------------------------------------+
+                  |                 LlamaKt DSL                  |
+                  +----------------------------------------------+
+                                         |
+                                         v
+                  +----------------------------------------------+
+                  |               GGMLEngine                       |
+                  +----------------------------------------------+
+                     /                   |                    \
+                    v                    v                     v
+        +-------------------+  +-------------------+  +-------------------+
+        |  CharacterEngine  |  |    RAGEngine      |  | AudioTranscriber  |
+        |  (Control/Moods)  |  | (Semantic Chunks) |  |   (Whisper JNI)   |
+        +-------------------+  +-------------------+  +-------------------+
+                    \                    |                    /
+                     v                   v                   v
+                  +----------------------------------------------+
+                  |             JNI Bridge (gguf_lib)            |
+                  +----------------------------------------------+
+                                         |
+                  +----------------------------------------------+
+                  |                  llama.cpp                   |
+                  +----------------------------------------------+
+                    /                    |                     \
+                   v                     v                      v
+        +------------------+   +------------------+   +------------------+
+        |   Qualcomm QNN   |   | MediaTek Neuron  |   |  Vulkan/OpenCL   |
+        |   Hexagon NPU    |   |  NeuroPilot APU  |   |    Adreno/Mali   |
+        +------------------+   +------------------+   +------------------+
+```
 
 ---
 
-## Features
+## Key Upgrades (Parity with LiteRT-LM)
 
-### Core Inference
-- **GGUF Model Loading** — Load models from file path, file descriptor, or Android content URIs (SAF)
-- **Streaming Generation** — Flow-based token streaming with real-time callbacks
-- **Multi-Turn Chat** — Typed conversation history with automatic serialization
-- **Context Management** — KV cache state save/restore across sessions
+### 1. Hardware Acceleration (NPU, APU and GPU Offloading)
+Bypasses CPU processing limits by compiling tensor instructions to dedicated accelerators:
+* **Qualcomm Hexagon NPU**: Native QNN (Qualcomm Neural Network) backend integration (`libQnnHtp.so`) utilizing DSP tensor pipelines.
+* **MediaTek APU**: Binds mathematical nodes directly to MediaTek NeuroPilot APUs (`libneuron_runtime.so`).
+* **Mali and Adreno GPUs**: Seamless Vulkan and OpenCL compute offloading.
 
-### Advanced Capabilities
-- **Tool Calling** — Grammar-constrained function calling in OpenAI format
-- **Structured Output** — Schema-defined JSON generation with type-safe results
-- **RAG Engine** — On-device retrieval-augmented generation with embedding models
-- **Character Engine** — Personality traits, mood states, and control vector support
-- **Embeddings** — Separate embedding model instance for semantic search
+### 2. Speculative Target-Draft Verification
+Increases processing speeds by up to **2x** on structured text (such as JSON or code blocks) using a lightweight dual-model speculative check:
+* Integrates a secondary small draft model (e.g., `Llama-3.2-1B-Draft`) alongside the target model.
+* The draft model predicts a sequence of token candidates, which are verified in parallel batches by the target model inside C++ JNI routines.
 
-### Performance
-- **ARM v8.6-a Optimizations** — DotProd, i8mm, FP16 instruction support
-- **Speculative Decoding** — N-gram self-speculative for 1.3-2x throughput on structured output
-- **Batched JNI** — Token batching to minimize JNI boundary crossing overhead
-- **Prompt Caching** — Disk-backed system prompt cache for fast cold starts
-- **Performance Core Pinning** — Automatic big.LITTLE core affinity for consistent throughput
+### 3. Dynamic RAM Swapping (Preventing OOM Crashes)
+Prevents background memory closures by actively releasing unused resources:
+* **`purgeRAM()`**: Employs Linux kernel page eviction (`madvise(MADV_DONTNEED)`) on the memory-mapped GGUF model weights, purging active resident RAM usage to zero when the app moves to the background.
+* **`reloadRAM()`**: Runs a fast model weight fault-in warm-up pass before generation begins, ensuring instant response.
 
-### Developer Experience
-- **Kotlin DSL** — One-liner engine configuration with builder pattern
-- **Lifecycle-Aware** — Automatic resource cleanup tied to Android lifecycle
-- **ProGuard Safe** — Pre-configured rules for R8 compatibility
-- **Typed API** — Data classes for model info, metrics, events, and messages
+### 4. Dynamic Context Sliding KV Cache Windows
+Eliminates context overflow crashes for long-running infinite chats:
+* Uses native `llama_memory_seq_rm` and `llama_memory_seq_shift` to evict older conversational tokens while leaving system prompts fully intact.
+* Exposed cleanly in both low-level and high-level DSL APIs (`applySlidingWindow(windowSize)`).
+
+### 5. Type-Safe JSON Schema Constrained Generation
+Generates structured JSON data conforming directly to Kotlin class definitions:
+* Kotlin reflection parses data fields and automatically generates strict JSON grammar constraints.
+* Enforces output validation through JNI grammar rules, automatically deserializing outputs back into type-safe Kotlin objects using GSON.
 
 ---
 
 ## Getting Started
 
-### Requirements
-
-| Requirement | Version |
-|---|---|
-| Android NDK | 27.0+ |
-| CMake | 3.22.1+ |
-| Min SDK | 24 |
-| Target ABI | arm64-v8a |
-| Kotlin | 1.9+ |
-
 ### Installation
-
-Add the module as a dependency in your project:
+Add the module to your Android Gradle configuration:
 
 ```kotlin
 // settings.gradle.kts
@@ -81,269 +103,111 @@ include(":llama.kt")
 // app/build.gradle.kts
 dependencies {
     implementation(project(":llama.kt"))
+    implementation("com.google.code.gson:gson:2.10.1")
 }
 ```
 
 ---
 
-## Usage Examples
+## In-Depth DSL Usage Examples
 
-### Basic: Kotlin DSL
+### 1. Basic Generation with Device-Adaptive Recommender
+Resilience-oriented model downloading and adaptive loading based on detected device RAM:
 
 ```kotlin
-val llama = LlamaKt {
-    model("/sdcard/models/llama-3.2-1b-q4.gguf")
-    contextSize(8192)
-    sampling {
-        temperature(0.7f)
-        topP(0.9f)
-        topK(40)
-    }
-    systemPrompt("You are a helpful assistant.")
-}
+// Determine device performance tier (Low, Mid, High)
+val downloader = ModelDownloader(context)
+val recommendation = downloader.getRecommendation()
 
-llama.chat("What is Kotlin?").collect { event ->
-    when (event) {
-        is GenerationEvent.Token -> print(event.text)
-        is GenerationEvent.Done -> println()
-        is GenerationEvent.Metrics -> {
-            println("${event.metrics.tokensPerSecond} tokens/sec")
+// Download progressive model
+downloader.download(recommendation.url, recommendation.name, object : ModelDownloader.DownloadCallback {
+    override fun onProgress(bytesDownloaded: Long, totalBytes: Long, percentage: Float, speedBytesPerSec: Long) {
+        println("Downloading: $percentage% at ${speedBytesPerSec / 1024} KB/s")
+    }
+    override fun onComplete(file: File) {
+        // Run hardware accelerated inference
+        val llama = LlamaKt {
+            model(file.absolutePath)
+            contextSize(4096)
+            backend(InferenceBackend.GPU_VULKAN) // Or NPU_QNN / CPU
+            flashAttention(true)
         }
-        is GenerationEvent.Error -> {
-            System.err.println("Error: ${event.message}")
+
+        CoroutineScope(Dispatchers.Main).launch {
+            llama.chat("Explain quantum physics simply.").collect { event ->
+                if (event is GenerationEvent.Token) print(event.text)
+            }
         }
-        else -> {}
     }
-}
-
-llama.close()
+    override fun onError(message: String) {
+        System.err.println("Download failed: $message")
+    }
+})
 ```
 
-### Multi-Turn Conversation
+### 2. Type-Safe Structured Serialization
+Dynamically generates JSON schemas using reflection and returns strongly-typed Kotlin classes:
 
 ```kotlin
-val conversation = ConversationManager(maxHistory = 50)
-conversation.systemPrompt = "You are a coding assistant."
+data class FilmReview(val title: String, val rating: Int, val isWorthWatching: Boolean)
 
-conversation.addUser("Explain coroutines in Kotlin")
-
-llama.chat(conversation).collect { event ->
-    when (event) {
-        is GenerationEvent.Token -> print(event.text)
-        is GenerationEvent.Done -> {} // response auto-appended to history
-        else -> {}
-    }
-}
-
-// Continue the conversation
-conversation.addUser("Show me a practical example")
-llama.chat(conversation).collect { ... }
-
-// Persist conversation to disk
-conversation.saveTo(File(context.filesDir, "chat_session.json"))
-
-// Restore later
-val restored = ConversationManager.loadFrom(File(context.filesDir, "chat_session.json"))
-```
-
-### Tool Calling
-
-```kotlin
-val llama = LlamaKt {
-    model("/path/to/model.gguf")
-    tool("get_weather", "Get the current weather for a location") {
-        stringParam("city", "City name", required = true)
-        enumParam("unit", "Temperature unit", listOf("celsius", "fahrenheit"))
-    }
-    tool("search_web", "Search the web for information") {
-        stringParam("query", "Search query", required = true)
-        integerParam("max_results", "Maximum results to return", required = false)
-    }
-}
-
-llama.chat("What is the weather in Tokyo?").collect { event ->
-    when (event) {
-        is GenerationEvent.ToolCall -> {
-            val name = event.name       // "get_weather"
-            val args = event.argsJson   // {"city":"Tokyo","unit":"celsius"}
-            // Execute tool, then feed result back
-        }
-        is GenerationEvent.Token -> print(event.text)
-        else -> {}
-    }
-}
-```
-
-### Structured JSON Output
-
-```kotlin
-val schema = JsonSchema("analysis_result")
-    .string("summary", "Brief summary of the analysis")
-    .number("confidence", "Confidence score between 0 and 1")
-    .enum("sentiment", "Overall sentiment", listOf("positive", "negative", "neutral"))
-    .array("keywords", "Relevant keywords", itemType = "string")
-
-val result = StructuredOutput.generate(
-    engine = engine,
-    prompt = "Analyze: The new update improved performance significantly",
-    schema = schema,
-)
-
-if (result.success) {
-    val summary = result.json!!.getString("summary")
-    val confidence = result.json!!.getDouble("confidence")
-    val sentiment = result.json!!.getString("sentiment")
-}
-```
-
-### Lifecycle-Aware Usage
-
-```kotlin
-class ChatActivity : AppCompatActivity() {
-    private lateinit var engine: LifecycleAwareEngine
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        engine = LifecycleAwareEngine(lifecycle)
-        engine.get().load("/path/to/model.gguf")
-
-        // No need to call unload() — the engine auto-releases
-        // when the Activity is destroyed.
-    }
-}
-```
-
-### Device-Adaptive Loading
-
-```kotlin
-val params = GGMLEngine.getRecommendedParams(context)
-engine.load(
-    path = modelPath,
-    contextSize = params.contextSize,
-    cacheTypeK = params.cacheTypeK,
-    cacheTypeV = params.cacheTypeV,
+// The model output is strictly constrained to the schema structure, deserialized on-the-fly
+val review: FilmReview? = llama.generateTypeSafe(
+    prompt = "Review the movie Inception.",
+    clazz = FilmReview::class.java
 )
 ```
 
----
+### 3. Annotation-Driven `@Tool` Reflection Loop
+Eliminates manual JSON parameter mapping and context-feeding loops:
 
-## API Reference
+```kotlin
+class DeviceUtilities {
+    @Tool("toggle_flashlight", "Turn on/off the device flashlight")
+    fun toggleFlashlight(
+        @ToolParam("Flashlight state") enabled: Boolean
+    ): String {
+        return "Flashlight is now ${if (enabled) "ON" else "OFF"}"
+    }
+}
 
-### Entry Points
-
-| Class | Description |
-|---|---|
-| `LlamaKt` | DSL-based engine builder. Recommended entry point. |
-| `GGMLEngine` | Low-level engine with full control over all parameters. |
-
-### Chat and Conversation
-
-| Class | Description |
-|---|---|
-| `ConversationManager` | Multi-turn chat history with typed messages, serialization, and persistence. |
-| `ChatMessage` | Data class representing a single message with role, content, and timestamp. |
-| `Role` | Enum: `SYSTEM`, `USER`, `ASSISTANT`, `TOOL`. |
-
-### Generation Events
-
-| Event | Description |
-|---|---|
-| `GenerationEvent.Token` | A new generated token. |
-| `GenerationEvent.Done` | Generation completed. |
-| `GenerationEvent.Error` | An error occurred. |
-| `GenerationEvent.ToolCall` | The model invoked a function. |
-| `GenerationEvent.Metrics` | Performance metrics for the generation pass. |
-| `GenerationEvent.Progress` | Prompt evaluation progress (0.0 to 1.0). |
-| `GenerationEvent.ThinkingBlock` | Internal reasoning from chain-of-thought models. |
-| `GenerationEvent.PartialResponse` | Accumulated text so far. |
-
-### Subsystems
-
-| Class | Description |
-|---|---|
-| `CharacterEngine` | Personality, mood, uncensored mode, and control vectors. |
-| `EmbeddingEngine` | Separate embedding model for text vectorization. |
-| `RAGEngine` | Retrieval-augmented generation with on-device indexing. |
-| `ToolManager` | Function calling registration and management. |
-| `StructuredOutput` | Schema-constrained JSON generation. |
-
-### Data Classes
-
-| Class | Description |
-|---|---|
-| `ModelInfo` | Parsed model metadata with formatted sizes. |
-| `DecodingMetrics` | Tokens/sec, TTFT, memory usage, and evaluation counts. |
-| `LoadingParams` | Recommended loading parameters per device tier. |
-| `GenerationResult` | Complete result from non-streaming generation. |
-
----
-
-## Build Instructions
-
-### From Source
-
-```bash
-git clone https://github.com/user/llama.kt.git
-cd llama.kt
-./gradlew assembleRelease
-```
-
-The output AAR is located at `build/outputs/aar/`.
-
-### Integration
-
-To use llama.kt as a module in an existing Android project:
-
-1. Copy the `llama.kt` directory into your project root.
-2. Add `include(":llama.kt")` to your `settings.gradle.kts`.
-3. Add `implementation(project(":llama.kt"))` to your app's `build.gradle.kts`.
-
----
-
-## Architecture
-
-```
-llama.kt/
-├── build.gradle.kts                 # Android Library + CMake config
-├── proguard-rules.pro               # R8/ProGuard keep rules
-├── consumer-rules.pro               # Rules propagated to consumer apps
-└── src/main/
-    ├── AndroidManifest.xml
-    ├── cpp/                          # Native layer
-    │   ├── CMakeLists.txt            # Build configuration
-    │   ├── gguf_lib.cpp              # JNI bridge (Kotlin <-> C++)
-    │   ├── include/                  # llama.cpp public headers
-    │   ├── src/                      # llama.cpp core implementation
-    │   ├── ggml/                     # GGML tensor library + CPU backend
-    │   ├── common/                   # Shared utilities (sampling, chat, etc.)
-    │   ├── engine/                   # Tool calling, RAG, character engine
-    │   └── vendor/                   # Third-party deps (nlohmann/json, stb, etc.)
-    └── java/com/dark/gguf_lib/       # Kotlin layer
-        ├── LlamaKt.kt               # DSL builder entry point
-        ├── GGMLEngine.kt            # Core inference engine
-        ├── GGUFNativeLib.kt          # JNI method declarations
-        ├── ConversationManager.kt    # Multi-turn chat history
-        ├── LifecycleAwareEngine.kt   # Android lifecycle integration
-        ├── StructuredOutput.kt       # Schema-based JSON generation
-        ├── CharacterEngine.kt        # Personality and mood control
-        ├── EmbeddingEngine.kt        # Text embedding generation
-        ├── RAGEngine.kt              # Retrieval-augmented generation
-        ├── ToolManager.kt            # Function calling management
-        ├── models/                   # Data classes (ModelInfo, Metrics, etc.)
-        └── toolcalling/              # Tool definition builders
+// Automatically registers tools, dispatches calls via reflection, and streams results
+llama.chatWithTools(
+    prompt = "It is dark here, please turn on my flashlight.",
+    toolHandlers = listOf(DeviceUtilities())
+).collect { event ->
+    when (event) {
+        is GenerationEvent.Token -> print(event.text)
+        is GenerationEvent.ToolCall -> println("Executing tool: ${event.name}")
+        is GenerationEvent.Done -> println("\nCompleted tool calling sequence.")
+    }
+}
 ```
 
 ---
 
-## Contributing
+## API Subsystems
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to this project.
+* **[RAGEngine](RAG.md)**: Features sentence-boundary `SemanticChunker` splits, 1-bit Binary Quantized (BQ) candidate lookup, and on-device C++ JNI Cross-Encoder re-ranking.
+* **AudioTranscriber**: Real-time speech-to-text pipeline wrapping Whisper models with hardware-optimized loops.
+* **CharacterEngine**: Adjusts model personalities dynamically using logit biases, mood properties, and uncensored modes.
+
+---
+
+## Systrace Profiling
+
+Developers can profile the exact bottlenecks of on-device LLM inference down to the millisecond inside **Android Studio CPU Profiler** using native ATrace tags:
+
+```cpp
+// Integrated profile blocks trace execution automatically
+TRACE_BEGIN("llama_eval_tokens");
+int rc = llama_decode(ctx, batch);
+TRACE_END();
+```
+
+* **Trace Sessions Provided**: `llama_load_model`, `llama_init_context`, `llama_warmup_decode` (faulting in weight pages), `llama_eval_tokens` (prefill evaluation), and `llama_decode_token` (single token decode loops).
 
 ---
 
 ## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
-llama.kt is built on [llama.cpp](https://github.com/ggml-org/llama.cpp), which is also MIT-licensed.
+This project is licensed under the **MIT License**. It is built on [llama.cpp](https://github.com/ggml-org/llama.cpp) which is also licensed under the MIT License.

@@ -4,7 +4,20 @@ project("gguf_lib")
 # Force Release optimizations
 set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 
-add_compile_definitions(GGML_USE_CPU)
+option(GGML_VULKAN "Use Vulkan backend" OFF)
+option(GGML_OPENCL "Use OpenCL backend" OFF)
+option(GGML_QNN "Use Qualcomm QNN NPU backend" OFF)
+
+if(GGML_VULKAN)
+    add_compile_definitions(GGML_USE_VULKAN)
+elseif(GGML_OPENCL)
+    add_compile_definitions(GGML_USE_OPENCL)
+elseif(GGML_QNN)
+    add_compile_definitions(GGML_USE_QNN)
+else()
+    add_compile_definitions(GGML_USE_CPU)
+endif()
+
 add_compile_definitions(_GNU_SOURCE)
 
 # Global optimization flags
@@ -57,6 +70,20 @@ set(GGML_SOURCES
     ggml/src/ggml-cpu/arch/arm/quants.c
     ggml/src/ggml-cpu/arch/arm/repack.cpp
 )
+
+if(GGML_VULKAN)
+    list(APPEND GGML_SOURCES ggml/src/ggml-vulkan/ggml-vulkan.cpp)
+    find_library(VULKAN_LIB vulkan REQUIRED)
+endif()
+
+if(GGML_OPENCL)
+    list(APPEND GGML_SOURCES ggml/src/ggml-opencl.cpp)
+    find_library(OPENCL_LIB OpenCL REQUIRED)
+endif()
+
+if(GGML_QNN)
+    list(APPEND GGML_SOURCES ggml/src/ggml-qnn.cpp)
+endif()
 
 # Llama Core
 set(LLAMA_SOURCES
@@ -141,3 +168,11 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     m
     dl
 )
+
+if(GGML_VULKAN)
+    target_link_libraries(${CMAKE_PROJECT_NAME} ${VULKAN_LIB})
+endif()
+
+if(GGML_OPENCL)
+    target_link_libraries(${CMAKE_PROJECT_NAME} ${OPENCL_LIB})
+endif()
