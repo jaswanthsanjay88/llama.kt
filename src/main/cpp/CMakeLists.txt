@@ -19,6 +19,8 @@ else()
 endif()
 
 add_compile_definitions(_GNU_SOURCE)
+add_compile_definitions(GGML_VERSION="1.2.0")
+add_compile_definitions(GGML_COMMIT="v1.2.0")
 
 # Global optimization flags
 add_compile_options(
@@ -43,16 +45,10 @@ endif()
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=safe -Wl,-z,max-page-size=16384")
 
 # GGML Core
+file(GLOB GGML_CORE_SOURCES ggml/src/*.c ggml/src/*.cpp)
+
 set(GGML_SOURCES
-    ggml/src/ggml.c
-    ggml/src/ggml.cpp
-    ggml/src/ggml-alloc.c
-    ggml/src/ggml-backend.cpp
-    ggml/src/ggml-opt.cpp
-    ggml/src/ggml-threading.cpp
-    ggml/src/ggml-quants.c
-    ggml/src/ggml-backend-reg.cpp
-    ggml/src/gguf.cpp
+    ${GGML_CORE_SOURCES}
     
     # CPU Backend (Corrected paths based on ggml-cpu directory)
     ggml/src/ggml-cpu/ggml-cpu.c
@@ -86,47 +82,13 @@ if(GGML_QNN)
 endif()
 
 # Llama Core
-set(LLAMA_SOURCES
-    src/llama.cpp
-    src/llama-adapter.cpp
-    src/llama-arch.cpp
-    src/llama-batch.cpp
-    src/llama-chat.cpp
-    src/llama-context.cpp
-    src/llama-cparams.cpp
-    src/llama-grammar.cpp
-    src/llama-graph.cpp
-    src/llama-hparams.cpp
-    src/llama-impl.cpp
-    src/llama-io.cpp
-    src/llama-kv-cache.cpp
-    src/llama-kv-cache-iswa.cpp
-    src/llama-memory.cpp
-    src/llama-memory-hybrid.cpp
-    src/llama-memory-hybrid-iswa.cpp
-    src/llama-memory-recurrent.cpp
-    src/llama-mmap.cpp
-    src/llama-model-loader.cpp
-    src/llama-model-saver.cpp
-    src/llama-model.cpp
-    src/llama-quant.cpp
-    src/llama-sampler.cpp
-    src/llama-vocab.cpp
-    src/unicode-data.cpp
-    src/unicode.cpp
-)
+file(GLOB LLAMA_SOURCES src/*.cpp)
 
 # Model implementations
 file(GLOB LLAMA_MODELS src/models/*.cpp)
 
 # Common Utilities
-set(COMMON_SOURCES
-    common/common.cpp
-    common/sampling.cpp
-    common/chat.cpp
-    common/json-schema-to-grammar.cpp
-    common/ngram-cache.cpp
-)
+file(GLOB_RECURSE COMMON_SOURCES common/*.cpp)
 
 # Engine components
 set(ENGINE_SOURCES

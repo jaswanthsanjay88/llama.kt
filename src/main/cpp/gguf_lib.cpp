@@ -1326,7 +1326,7 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStream(
     common_params_sampling saved_params;
     if (!tmpl_result.grammar.empty() && !g_state.tools_json.empty()) {
         saved_params = g_state.sampling_params; // save for restore after generation
-        g_state.sampling_params.grammar = tmpl_result.grammar;
+        g_state.sampling_params.grammar = common_grammar(COMMON_GRAMMAR_TYPE_TOOL_CALLS, tmpl_result.grammar);
         g_state.sampling_params.grammar_lazy = tmpl_result.grammar_lazy;
         g_state.sampling_params.grammar_triggers = tmpl_result.grammar_triggers;
         // Resolve preserved_tokens strings to token IDs
@@ -1688,7 +1688,7 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStreamMultiTurn(
     common_params_sampling saved_params;
     if (!tmpl_result.grammar.empty() && !g_state.tools_json.empty()) {
         saved_params = g_state.sampling_params;
-        g_state.sampling_params.grammar = tmpl_result.grammar;
+        g_state.sampling_params.grammar = common_grammar(COMMON_GRAMMAR_TYPE_TOOL_CALLS, tmpl_result.grammar);
         g_state.sampling_params.grammar_lazy = tmpl_result.grammar_lazy;
         g_state.sampling_params.grammar_triggers = tmpl_result.grammar_triggers;
         for (auto & tok_str : tmpl_result.preserved_tokens) {
@@ -3246,7 +3246,7 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeApplySlidingWindow(
         int evict_end = keep_start + evict_count;
         
         llama_memory_seq_rm(mem, 0, evict_start, evict_end);
-        llama_memory_seq_shift(mem, 0, evict_end, g_state.n_past, -evict_count);
+        llama_memory_seq_add(mem, 0, evict_end, g_state.n_past, -evict_count);
         
         g_state.n_past -= evict_count;
         LOGI("KV cache shift complete. New active context size: %d tokens", g_state.n_past);
