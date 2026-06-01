@@ -330,14 +330,11 @@ class LlamaKt private constructor(
                     val toolCallId = "call_${System.currentTimeMillis()}_${(0..999).random()}"
 
                     // Execute tool via annotation reflection
-                    val startTime = System.currentTimeMillis()
-                    var resultStr = ""
-                    try {
-                        resultStr = toolExecutor.execute(toolName, argsJson) ?: ""
+                    val resultStr = try {
+                        toolExecutor.execute(toolName, argsJson)
                     } catch (e: Exception) {
-                        resultStr = "Error executing tool: ${e.message}"
+                        "Error executing tool: ${e.message}"
                     }
-                    val durationMs = System.currentTimeMillis() - startTime
 
                     // Emit ToolResult event
                     trySend(GenerationEvent.ToolResult(toolCallId, toolName, resultStr))

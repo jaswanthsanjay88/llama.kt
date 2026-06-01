@@ -150,8 +150,8 @@ class ConversationManager(
                         val role = Role.fromString(msg.getString("role"))
                         val content = msg.getString("content")
                         val timestamp = msg.optLong("timestamp", System.currentTimeMillis())
-                        val toolCallId = msg.optString("tool_call_id", null)
-                        val toolName = msg.optString("name", null)
+                        val toolCallId = if (msg.has("tool_call_id")) msg.getString("tool_call_id") else null
+                        val toolName = if (msg.has("name")) msg.getString("name") else null
                         manager.messages.add(ChatMessage(role, content, timestamp, toolCallId, toolName))
                     }
                 }

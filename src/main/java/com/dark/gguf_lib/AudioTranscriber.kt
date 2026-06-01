@@ -59,7 +59,7 @@ class AudioTranscriber {
      */
     suspend fun transcribe(
         audioPCMBytes: ByteArray,
-        sampleRate: Int = 16000,
+        @Suppress("UNUSED_PARAMETER") sampleRate: Int = 16000,
     ): String = withContext(Dispatchers.IO) {
         if (!loaded) return@withContext "Error: Audio model is not loaded"
         GGUFNativeLib.nativeTranscribeAudio(audioPCMBytes) ?: ""
