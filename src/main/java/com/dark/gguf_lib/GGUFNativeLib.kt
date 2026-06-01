@@ -36,6 +36,12 @@ object GGUFNativeLib {
     external fun nativeGenerateStreamWithImage(
         prompt: String, imageBytes: ByteArray, maxTokens: Int, callback: StreamCallback
     ): Boolean
+    external fun nativeGenerateStreamWithAudio(
+        prompt: String, audioBytes: ByteArray, sampleRate: Int, maxTokens: Int, callback: StreamCallback
+    ): Boolean
+    external fun nativeSupportsVision(): Boolean
+    external fun nativeSupportsAudio(): Boolean
+    external fun nativeGetVisionInfo(): String?
 
     // ---- Speculative Draft Model ----
 
@@ -153,4 +159,9 @@ object GGUFNativeLib {
 
     external fun nativeApplySlidingWindow(windowSize: Int): Boolean
     external fun nativeRagRerank(query: String, docs: Array<String>): String?
+
+    // ---- Native Function Calling (Agentic) ----
+
+    external fun nativeInjectToolResult(toolCallId: String, toolName: String, resultJson: String): Boolean
+    external fun nativeResumeGeneration(maxTokens: Int, callback: StreamCallback): Boolean
 }

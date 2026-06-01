@@ -96,7 +96,12 @@ set(ENGINE_SOURCES
     engine/character-engine.cpp
     engine/rag-engine.cpp
     engine/ggml-engine.cpp
+    engine/ggml-engine-vlm.cpp
 )
+
+# Vision Language Model (CLIP/mtmd multimodal)
+file(GLOB VLM_SOURCES engine/vlm/*.cpp)
+file(GLOB VLM_MODEL_SOURCES engine/vlm/models/*.cpp)
 
 # JNI bridge
 set(JNI_SOURCES
@@ -109,6 +114,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     ${LLAMA_MODELS}
     ${COMMON_SOURCES}
     ${ENGINE_SOURCES}
+    ${VLM_SOURCES}
+    ${VLM_MODEL_SOURCES}
     ${JNI_SOURCES}
 )
 
@@ -120,6 +127,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ggml/src/ggml-cpu
     vendor
     engine
+    engine/vlm
     src
     .
 )

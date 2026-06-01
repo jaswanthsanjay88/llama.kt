@@ -56,6 +56,12 @@ class ConversationManager(
         trimHistory()
     }
 
+    /** Add an assistant tool-call message (records the tool invocation). */
+    fun addToolCall(name: String, argsJson: String, toolCallId: String) {
+        messages.add(ChatMessage(Role.ASSISTANT, argsJson, toolCallId = toolCallId, toolName = name))
+        trimHistory()
+    }
+
     /** Get all messages (including system prompt). */
     fun allMessages(): List<ChatMessage> {
         val all = mutableListOf<ChatMessage>()
@@ -92,6 +98,8 @@ class ConversationManager(
             arr.put(JSONObject().apply {
                 put("role", msg.role.value)
                 put("content", msg.content)
+                msg.toolCallId?.let { put("tool_call_id", it) }
+                msg.toolName?.let { put("name", it) }
             })
         }
         return arr.toString()
@@ -109,6 +117,8 @@ class ConversationManager(
                         put("role", msg.role.value)
                         put("content", msg.content)
                         put("timestamp", msg.timestamp)
+                        msg.toolCallId?.let { put("tool_call_id", it) }
+                        msg.toolName?.let { put("name", it) }
                     })
                 }
             })
@@ -140,7 +150,9 @@ class ConversationManager(
                         val role = Role.fromString(msg.getString("role"))
                         val content = msg.getString("content")
                         val timestamp = msg.optLong("timestamp", System.currentTimeMillis())
-                        manager.messages.add(ChatMessage(role, content, timestamp))
+                        val toolCallId = msg.optString("tool_call_id", null)
+                        val toolName = msg.optString("name", null)
+                        manager.messages.add(ChatMessage(role, content, timestamp, toolCallId, toolName))
                     }
                 }
             } catch (_: Exception) {
@@ -168,4 +180,6 @@ data class ChatMessage(
     val role: Role,
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
+    val toolCallId: String? = null,
+    val toolName: String? = null,
 )

@@ -11,6 +11,9 @@ sealed class GenerationEvent {
     /** The model invoked a tool/function call. */
     data class ToolCall(val name: String, val argsJson: String) : GenerationEvent()
 
+    /** The result from executing a tool, fed back for continued generation. */
+    data class ToolResult(val callId: String, val name: String, val result: String) : GenerationEvent()
+
     /** Generation completed successfully. */
     data object Done : GenerationEvent()
 

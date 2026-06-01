@@ -32,6 +32,10 @@
 #include "rag-engine.h"
 #include "ngram-cache.h"
 
+// Multimodal (Vision/Audio) support
+#include "vlm/mtmd.h"
+#include "vlm/mtmd-helper.h"
+
 #include <nlohmann/json.hpp>
 
 #define TAG "ToolNeuron-JNI"
@@ -3096,22 +3100,51 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeReleaseDraftModel(
     LOGI("Speculative draft model released");
 }
 
-// ---- Multimodal Vision (CLIP/LLaVA) ----
+// ---- Multimodal Vision (CLIP/LLaVA via mtmd) ----
 
 static struct {
-    void * clip_ctx = nullptr;
+    mtmd_context * mtmd_ctx = nullptr;
 } g_vision_state;
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadVisionModel(
         JNIEnv * env, jobject, jstring jclipPath) {
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+
+    if (!g_state.model) {
+        LOGE("Cannot load vision model: text model not loaded");
+        return JNI_FALSE;
+    }
+
     const char * clip_path = env->GetStringUTFChars(jclipPath, nullptr);
-    LOGI("Loading CLIP/LLaVA vision model: %s", clip_path);
-    
-    g_vision_state.clip_ctx = malloc(1); // placeholder to indicate loaded state
-    
+    LOGI("Loading multimodal vision projector: %s", clip_path);
+
+    // Release previous vision context if any
+    if (g_vision_state.mtmd_ctx) {
+        mtmd_free(g_vision_state.mtmd_ctx);
+        g_vision_state.mtmd_ctx = nullptr;
+    }
+
+    auto mtmd_params = mtmd_context_params_default();
+    mtmd_params.use_gpu     = false;  // CPU only for Android
+    mtmd_params.n_threads   = g_state.n_threads_batch > 0 ? g_state.n_threads_batch : batch_thread_count();
+    mtmd_params.print_timings = false;
+    mtmd_params.warmup      = true;
+
+    TRACE_BEGIN("mtmd_init_from_file");
+    g_vision_state.mtmd_ctx = mtmd_init_from_file(clip_path, g_state.model, mtmd_params);
+    TRACE_END();
+
     env->ReleaseStringUTFChars(jclipPath, clip_path);
+
+    if (!g_vision_state.mtmd_ctx) {
+        LOGE("Failed to initialize mtmd vision context");
+        return JNI_FALSE;
+    }
+
+    LOGI("Vision projector loaded: vision=%s audio=%s",
+         mtmd_support_vision(g_vision_state.mtmd_ctx) ? "yes" : "no",
+         mtmd_support_audio(g_vision_state.mtmd_ctx)  ? "yes" : "no");
     return JNI_TRUE;
 }
 
@@ -3119,43 +3152,330 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeReleaseVisionModel(
         JNIEnv * env, jobject) {
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
-    if (g_vision_state.clip_ctx) {
-        LOGI("Releasing CLIP/LLaVA vision model");
-        free(g_vision_state.clip_ctx);
-        g_vision_state.clip_ctx = nullptr;
+    if (g_vision_state.mtmd_ctx) {
+        LOGI("Releasing multimodal vision projector");
+        mtmd_free(g_vision_state.mtmd_ctx);
+        g_vision_state.mtmd_ctx = nullptr;
     }
+}
+
+// Helper: Run multimodal generation (shared by image and audio paths)
+static jboolean run_multimodal_generation(
+        JNIEnv * env, jstring jprompt, jint maxTokens, jobject callback,
+        const unsigned char * media_data, size_t media_size) {
+
+    std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+
+    if (!g_state.model || !g_state.ctx) {
+        LOGE("Model not loaded");
+        return JNI_FALSE;
+    }
+    if (!g_vision_state.mtmd_ctx) {
+        LOGE("Vision/audio projector not loaded");
+        return JNI_FALSE;
+    }
+
+    g_state.cancel_flag = false;
+    g_utf8_buffer.clear();
+
+    if (!ensure_callback_methods(env, callback)) {
+        LOGE("Failed to find callback methods");
+        return JNI_FALSE;
+    }
+
+    const char * prompt_cstr = env->GetStringUTFChars(jprompt, nullptr);
+    std::string user_prompt(prompt_cstr);
+    env->ReleaseStringUTFChars(jprompt, prompt_cstr);
+
+    // Build the full prompt with media marker
+    const char * marker = mtmd_default_marker();
+    std::string full_prompt;
+    if (!g_state.system_prompt.empty()) {
+        full_prompt += g_state.system_prompt + "\n\n";
+    }
+    // If user prompt doesn't already contain the marker, prepend it
+    if (user_prompt.find(marker) == std::string::npos) {
+        full_prompt += std::string(marker) + "\n" + user_prompt;
+    } else {
+        full_prompt += user_prompt;
+    }
+
+    // Create bitmap from media bytes (auto-detects image vs audio format)
+    TRACE_BEGIN("mtmd_bitmap_init");
+    mtmd_bitmap * bitmap = mtmd_helper_bitmap_init_from_buf(
+        g_vision_state.mtmd_ctx, media_data, media_size);
+    TRACE_END();
+
+    if (!bitmap) {
+        LOGE("Failed to create bitmap from media data (%zu bytes)", media_size);
+        jstring jerr = env->NewStringUTF("Failed to decode media input");
+        env->CallVoidMethod(callback, g_onError, jerr);
+        env->DeleteLocalRef(jerr);
+        return JNI_FALSE;
+    }
+
+    bool is_audio = mtmd_bitmap_is_audio(bitmap);
+    LOGI("Media type: %s, size: %zu bytes", is_audio ? "audio" : "image", media_size);
+
+    // Tokenize prompt + media into chunks
+    mtmd_input_chunks * chunks = mtmd_input_chunks_init();
+    mtmd_input_text input_text;
+    input_text.text = full_prompt.c_str();
+    input_text.add_special = true;
+    input_text.parse_special = true;
+
+    const mtmd_bitmap * bitmap_ptr = bitmap;
+    TRACE_BEGIN("mtmd_tokenize");
+    int32_t tok_result = mtmd_tokenize(g_vision_state.mtmd_ctx, chunks,
+        &input_text, &bitmap_ptr, 1);
+    TRACE_END();
+
+    mtmd_bitmap_free(bitmap);
+
+    if (tok_result != 0) {
+        LOGE("mtmd_tokenize failed: %d", tok_result);
+        mtmd_input_chunks_free(chunks);
+        jstring jerr = env->NewStringUTF("Failed to tokenize multimodal input");
+        env->CallVoidMethod(callback, g_onError, jerr);
+        env->DeleteLocalRef(jerr);
+        return JNI_FALSE;
+    }
+
+    size_t total_tokens = mtmd_helper_get_n_tokens(chunks);
+    LOGI("Multimodal tokenization: %zu total tokens across %zu chunks",
+         total_tokens, mtmd_input_chunks_size(chunks));
+
+    // Report prompt eval progress
+    if (g_onProgress) {
+        env->CallVoidMethod(callback, g_onProgress, 0.1f);
+    }
+
+    // Clear KV cache for fresh multimodal evaluation
+    llama_memory_t mem = llama_get_memory(g_state.ctx);
+    if (mem) llama_memory_clear(mem, true);
+    g_state.n_past = 0;
+
+    // Evaluate all chunks: text decoding + image/audio encoding + embedding injection
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    llama_pos new_n_past = 0;
+    TRACE_BEGIN("mtmd_eval_chunks");
+    int32_t eval_result = mtmd_helper_eval_chunks(
+        g_vision_state.mtmd_ctx, g_state.ctx, chunks,
+        0,      // n_past
+        0,      // seq_id
+        512,    // n_batch
+        true,   // logits_last
+        &new_n_past);
+    TRACE_END();
+
+    mtmd_input_chunks_free(chunks);
+
+    if (eval_result != 0) {
+        LOGE("mtmd_helper_eval_chunks failed: %d", eval_result);
+        jstring jerr = env->NewStringUTF("Failed to evaluate multimodal input");
+        env->CallVoidMethod(callback, g_onError, jerr);
+        env->DeleteLocalRef(jerr);
+        return JNI_FALSE;
+    }
+
+    g_state.n_past = new_n_past;
+
+    auto t_prompt_done = std::chrono::high_resolution_clock::now();
+    int prompt_tokens = (int)g_state.n_past;
+
+    if (g_onProgress) {
+        env->CallVoidMethod(callback, g_onProgress, 1.0f);
+    }
+
+    LOGI("Multimodal prompt evaluated: %d tokens at n_past=%d", prompt_tokens, g_state.n_past);
+
+    // Reset sampler for generation
+    rebuild_sampler();
+
+    // Generate tokens (same autoregressive loop as text generation)
+    const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+    int n_generated = 0;
+    std::string generated_text;
+    generated_text.reserve(maxTokens * 4);
+    size_t sent_count = 0;
+
+    // Set up antiprompt detector
+    antiprompt_state antiprompt;
+    antiprompt.set_stops(COMMON_STOP_STRINGS);
+
+    token_batcher batcher(env, callback, g_onToken);
+
+    while (n_generated < maxTokens && !g_state.cancel_flag.load()) {
+        if (!g_state.sampler) break;
+
+        llama_token id = common_sampler_sample(g_state.sampler, g_state.ctx, -1);
+        common_sampler_accept(g_state.sampler, id, true);
+
+        if (llama_vocab_is_eog(vocab, id)) break;
+
+        char buf[256];
+        int n = llama_token_to_piece(vocab, id, buf, sizeof(buf) - 1, 0, true);
+        if (n > 0) {
+            buf[n] = '\0';
+            generated_text.append(buf, n);
+
+            // Two-phase antiprompt detection
+            size_t unsent_start = std::min(sent_count, generated_text.size());
+            std::string unsent(generated_text.data() + unsent_start, generated_text.size() - unsent_start);
+
+            size_t stop_pos = antiprompt.find_stop(unsent, (size_t)n, STOP_FULL);
+            if (stop_pos != std::string::npos) {
+                generated_text.resize(unsent_start + stop_pos);
+                if (sent_count < generated_text.size()) {
+                    batcher.add(generated_text.data() + sent_count, generated_text.size() - sent_count);
+                }
+                batcher.flush();
+                break;
+            }
+
+            stop_pos = antiprompt.find_stop(unsent, (size_t)n, STOP_PARTIAL);
+            if (stop_pos == std::string::npos) {
+                if (sent_count < generated_text.size()) {
+                    batcher.add(generated_text.data() + sent_count, generated_text.size() - sent_count);
+                    sent_count = generated_text.size();
+                }
+            }
+
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        }
+
+        // Context overflow shift
+        if (g_state.n_past >= (int)llama_n_ctx(g_state.ctx) - 1) {
+            if (!try_context_shift()) break;
+        }
+
+        llama_batch & sb = get_single_batch();
+        common_batch_clear(sb);
+        common_batch_add(sb, id, g_state.n_past, {0}, true);
+        TRACE_BEGIN("llama_decode_token");
+        int decode_res = llama_decode(g_state.ctx, sb);
+        TRACE_END();
+        if (decode_res != 0) break;
+        g_state.n_past++;
+        n_generated++;
+    }
+
+    // Flush remaining tokens
+    if (sent_count < generated_text.size()) {
+        batcher.add(generated_text.data() + sent_count, generated_text.size() - sent_count);
+    }
+    batcher.flush();
+    if (!g_utf8_buffer.empty()) {
+        batcher.buf = std::move(g_utf8_buffer);
+        g_utf8_buffer.clear();
+        batcher.flush();
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+
+    // Check for tool calls in output
+    if (g_onToolCall && !g_state.tools_json.empty() && g_state.chat_templates) {
+        try {
+            common_chat_parser_params parser_params;
+            auto parsed = common_chat_parse(generated_text, false, parser_params);
+            for (auto & tc : parsed.tool_calls) {
+                json wrapped;
+                wrapped["name"] = tc.name;
+                try { wrapped["arguments"] = json::parse(tc.arguments); }
+                catch (...) { wrapped["arguments"] = tc.arguments; }
+                std::string wrapped_str = wrapped.dump();
+                jstring jname = safe_new_string_utf(env, tc.name.c_str());
+                jstring jargs = safe_new_string_utf(env, wrapped_str.c_str());
+                env->CallVoidMethod(callback, g_onToolCall, jname, jargs);
+                env->DeleteLocalRef(jname);
+                env->DeleteLocalRef(jargs);
+                LOGI("Multimodal tool call detected: %s", tc.name.c_str());
+            }
+        } catch (...) {}
+    }
+
+    // Metrics
+    float prompt_ms = std::chrono::duration<float, std::milli>(t_prompt_done - t_start).count();
+    float gen_ms = std::chrono::duration<float, std::milli>(t_end - t_prompt_done).count();
+    float total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+    float tps = gen_ms > 0 ? (n_generated / (gen_ms / 1000.0f)) : 0;
+
+    if (g_onMetrics) {
+        env->CallVoidMethod(callback, g_onMetrics,
+            tps, prompt_ms, total_ms,
+            prompt_tokens, n_generated,
+            0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    env->CallVoidMethod(callback, g_onDone);
+    LOGI("Multimodal generation complete: %d tokens, %.1f t/s, %.1f ms total",
+         n_generated, tps, total_ms);
+
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStreamWithImage(
         JNIEnv * env, jobject thiz, jstring jprompt, jbyteArray jimageBytes, jint maxTokens, jobject callback) {
-    
+
     jsize img_len = env->GetArrayLength(jimageBytes);
     jbyte * img_data = env->GetByteArrayElements(jimageBytes, nullptr);
-    LOGI("Processing multimodal generation with image of size %d bytes", img_len);
-    
+
+    LOGI("Multimodal image generation: %d bytes", img_len);
+
+    jboolean result = run_multimodal_generation(
+        env, jprompt, maxTokens, callback,
+        (const unsigned char *)img_data, (size_t)img_len);
+
     env->ReleaseByteArrayElements(jimageBytes, img_data, JNI_ABORT);
-    
-    // Delegate to standard prompt generation
-    return Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStream(env, thiz, jprompt, maxTokens, callback);
+    return result;
 }
 
-// ---- Audio Transcribing (whisper.cpp) ----
+// ---- Multimodal Audio (via mtmd) ----
 
 static struct {
-    void * whisper_ctx = nullptr;
+    mtmd_context * mtmd_ctx = nullptr;
 } g_audio_state;
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadAudioModel(
         JNIEnv * env, jobject, jstring jpath) {
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+
+    if (!g_state.model) {
+        LOGE("Cannot load audio model: text model not loaded");
+        return JNI_FALSE;
+    }
+
     const char * path = env->GetStringUTFChars(jpath, nullptr);
-    LOGI("Loading Whisper audio model: %s", path);
-    
-    g_audio_state.whisper_ctx = malloc(1); // placeholder indicating loaded state
-    
+    LOGI("Loading multimodal audio projector: %s", path);
+
+    if (g_audio_state.mtmd_ctx) {
+        mtmd_free(g_audio_state.mtmd_ctx);
+        g_audio_state.mtmd_ctx = nullptr;
+    }
+
+    auto mtmd_params = mtmd_context_params_default();
+    mtmd_params.use_gpu       = false;
+    mtmd_params.n_threads     = g_state.n_threads_batch > 0 ? g_state.n_threads_batch : batch_thread_count();
+    mtmd_params.print_timings = false;
+    mtmd_params.warmup        = true;
+
+    TRACE_BEGIN("mtmd_init_audio");
+    g_audio_state.mtmd_ctx = mtmd_init_from_file(path, g_state.model, mtmd_params);
+    TRACE_END();
+
     env->ReleaseStringUTFChars(jpath, path);
+
+    if (!g_audio_state.mtmd_ctx) {
+        LOGE("Failed to initialize mtmd audio context");
+        return JNI_FALSE;
+    }
+
+    LOGI("Audio projector loaded: audio=%s, bitrate=%d Hz",
+         mtmd_support_audio(g_audio_state.mtmd_ctx) ? "yes" : "no",
+         mtmd_get_audio_bitrate(g_audio_state.mtmd_ctx));
     return JNI_TRUE;
 }
 
@@ -3163,25 +3483,388 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeReleaseAudioModel(
         JNIEnv * env, jobject) {
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
-    if (g_audio_state.whisper_ctx) {
-        LOGI("Releasing Whisper audio model");
-        free(g_audio_state.whisper_ctx);
-        g_audio_state.whisper_ctx = nullptr;
+    if (g_audio_state.mtmd_ctx) {
+        LOGI("Releasing multimodal audio projector");
+        mtmd_free(g_audio_state.mtmd_ctx);
+        g_audio_state.mtmd_ctx = nullptr;
     }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeTranscribeAudio(
         JNIEnv * env, jobject, jbyteArray jpcmBytes) {
+    std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+
+    if (!g_state.model || !g_state.ctx) {
+        return env->NewStringUTF("Error: text model not loaded");
+    }
+
+    // Determine which mtmd context to use (prefer dedicated audio, fallback to vision)
+    mtmd_context * mtmd_ctx = g_audio_state.mtmd_ctx;
+    if (!mtmd_ctx) mtmd_ctx = g_vision_state.mtmd_ctx;
+    if (!mtmd_ctx) {
+        return env->NewStringUTF("Error: no audio/vision projector loaded");
+    }
+
     jsize pcm_len = env->GetArrayLength(jpcmBytes);
     jbyte * pcm_data = env->GetByteArrayElements(jpcmBytes, nullptr);
-    LOGI("Transcribing audio payload of size %d bytes", pcm_len);
-    
-    // Fallback simulated result showing complete execution path
-    std::string result = "Processed on-device audio transcription.";
-    
+    LOGI("Transcribing audio: %d bytes of PCM data", pcm_len);
+
+    // Convert byte array to float samples (16-bit signed PCM -> float)
+    int n_samples = pcm_len / 2;  // 16-bit = 2 bytes per sample
+    std::vector<float> samples(n_samples);
+    const int16_t * pcm16 = (const int16_t *)pcm_data;
+    for (int i = 0; i < n_samples; i++) {
+        samples[i] = (float)pcm16[i] / 32768.0f;
+    }
     env->ReleaseByteArrayElements(jpcmBytes, pcm_data, JNI_ABORT);
-    return env->NewStringUTF(result.c_str());
+
+    // Create audio bitmap from float samples
+    mtmd_bitmap * bitmap = mtmd_bitmap_init_from_audio((size_t)n_samples, samples.data());
+    if (!bitmap) {
+        LOGE("Failed to create audio bitmap");
+        return env->NewStringUTF("Error: failed to create audio bitmap");
+    }
+
+    // Tokenize with audio marker
+    mtmd_input_chunks * chunks = mtmd_input_chunks_init();
+    const char * marker = mtmd_default_marker();
+    std::string prompt = std::string(marker) + "\nTranscribe the audio.";
+
+    mtmd_input_text input_text;
+    input_text.text = prompt.c_str();
+    input_text.add_special = true;
+    input_text.parse_special = true;
+
+    const mtmd_bitmap * bitmap_ptr = bitmap;
+    int32_t tok_result = mtmd_tokenize(mtmd_ctx, chunks, &input_text, &bitmap_ptr, 1);
+    mtmd_bitmap_free(bitmap);
+
+    if (tok_result != 0) {
+        mtmd_input_chunks_free(chunks);
+        LOGE("Audio tokenization failed: %d", tok_result);
+        return env->NewStringUTF("Error: audio tokenization failed");
+    }
+
+    // Clear KV cache and evaluate chunks
+    llama_memory_t mem = llama_get_memory(g_state.ctx);
+    if (mem) llama_memory_clear(mem, true);
+    g_state.n_past = 0;
+
+    llama_pos new_n_past = 0;
+    TRACE_BEGIN("mtmd_eval_audio");
+    int32_t eval_result = mtmd_helper_eval_chunks(
+        mtmd_ctx, g_state.ctx, chunks, 0, 0, 512, true, &new_n_past);
+    TRACE_END();
+    mtmd_input_chunks_free(chunks);
+
+    if (eval_result != 0) {
+        LOGE("Audio chunk evaluation failed: %d", eval_result);
+        return env->NewStringUTF("Error: audio evaluation failed");
+    }
+
+    g_state.n_past = new_n_past;
+    rebuild_sampler();
+
+    // Generate transcription text
+    const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+    std::string result;
+    result.reserve(4096);
+    int max_tokens = 2048;
+
+    for (int i = 0; i < max_tokens; i++) {
+        if (!g_state.sampler) break;
+        llama_token id = common_sampler_sample(g_state.sampler, g_state.ctx, -1);
+        common_sampler_accept(g_state.sampler, id, true);
+        if (llama_vocab_is_eog(vocab, id)) break;
+
+        char buf[256];
+        int n = llama_token_to_piece(vocab, id, buf, sizeof(buf) - 1, 0, true);
+        if (n > 0) { buf[n] = '\0'; result.append(buf, n); }
+
+        llama_batch & sb = get_single_batch();
+        common_batch_clear(sb);
+        common_batch_add(sb, id, g_state.n_past, {0}, true);
+        if (llama_decode(g_state.ctx, sb) != 0) break;
+        g_state.n_past++;
+    }
+
+    LOGI("Audio transcription complete: %zu characters", result.size());
+    return safe_new_string_utf(env, result.c_str());
+}
+
+// ---- Multimodal Audio Streaming Generation ----
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStreamWithAudio(
+        JNIEnv * env, jobject thiz, jstring jprompt, jbyteArray jaudioBytes,
+        jint sampleRate, jint maxTokens, jobject callback) {
+
+    jsize audio_len = env->GetArrayLength(jaudioBytes);
+    jbyte * audio_data = env->GetByteArrayElements(jaudioBytes, nullptr);
+
+    LOGI("Multimodal audio generation: %d bytes, %d Hz", audio_len, sampleRate);
+
+    // Use the shared multimodal generation path (mtmd auto-detects audio format)
+    jboolean result = run_multimodal_generation(
+        env, jprompt, maxTokens, callback,
+        (const unsigned char *)audio_data, (size_t)audio_len);
+
+    env->ReleaseByteArrayElements(jaudioBytes, audio_data, JNI_ABORT);
+    return result;
+}
+
+// ---- Multimodal Capability Queries ----
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeSupportsVision(
+        JNIEnv * env, jobject) {
+    if (g_vision_state.mtmd_ctx) {
+        return mtmd_support_vision(g_vision_state.mtmd_ctx) ? JNI_TRUE : JNI_FALSE;
+    }
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeSupportsAudio(
+        JNIEnv * env, jobject) {
+    // Check dedicated audio context first, then vision context
+    if (g_audio_state.mtmd_ctx) {
+        return mtmd_support_audio(g_audio_state.mtmd_ctx) ? JNI_TRUE : JNI_FALSE;
+    }
+    if (g_vision_state.mtmd_ctx) {
+        return mtmd_support_audio(g_vision_state.mtmd_ctx) ? JNI_TRUE : JNI_FALSE;
+    }
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGetVisionInfo(
+        JNIEnv * env, jobject) {
+    mtmd_context * ctx = g_vision_state.mtmd_ctx;
+    if (!ctx) ctx = g_audio_state.mtmd_ctx;
+    if (!ctx) return env->NewStringUTF("{}");
+
+    json info;
+    info["supports_vision"]  = mtmd_support_vision(ctx);
+    info["supports_audio"]   = mtmd_support_audio(ctx);
+    info["uses_mrope"]       = mtmd_decode_use_mrope(ctx);
+    info["uses_non_causal"]  = mtmd_decode_use_non_causal(ctx);
+    info["audio_bitrate"]    = mtmd_get_audio_bitrate(ctx);
+    info["default_marker"]   = mtmd_default_marker();
+
+    std::string json_str = info.dump();
+    return env->NewStringUTF(json_str.c_str());
+}
+
+// ---- Native Function Calling (Agentic Tool Result Injection) ----
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeInjectToolResult(
+        JNIEnv * env, jobject, jstring jtoolCallId, jstring jtoolName, jstring jresultJson) {
+
+    std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+
+    if (!g_state.model || !g_state.ctx) {
+        LOGE("Cannot inject tool result: model not loaded");
+        return JNI_FALSE;
+    }
+
+    const char * tcid_cstr = env->GetStringUTFChars(jtoolCallId, nullptr);
+    const char * name_cstr = env->GetStringUTFChars(jtoolName, nullptr);
+    const char * result_cstr = env->GetStringUTFChars(jresultJson, nullptr);
+
+    std::string tool_call_id(tcid_cstr);
+    std::string tool_name(name_cstr);
+    std::string result_json(result_cstr);
+
+    env->ReleaseStringUTFChars(jtoolCallId, tcid_cstr);
+    env->ReleaseStringUTFChars(jtoolName, name_cstr);
+    env->ReleaseStringUTFChars(jresultJson, result_cstr);
+
+    LOGI("Injecting tool result: tool=%s call_id=%s result_len=%zu",
+         tool_name.c_str(), tool_call_id.c_str(), result_json.size());
+
+    // Build tool result message in chat template format
+    common_chat_msg tool_msg;
+    tool_msg.role = "tool";
+    tool_msg.content = result_json;
+    tool_msg.tool_call_id = tool_call_id;
+
+    // Apply chat template for just the tool result + generation prompt
+    std::vector<common_chat_msg> messages;
+    messages.push_back(tool_msg);
+
+    auto tmpl_result = apply_chat_template(messages, true);
+    auto tokens = tokenize_string(tmpl_result.prompt, false);
+
+    if (tokens.empty()) {
+        LOGE("Failed to tokenize tool result");
+        return JNI_FALSE;
+    }
+
+    LOGI("Tool result tokenized to %zu tokens, evaluating at n_past=%d",
+         tokens.size(), g_state.n_past);
+
+    // Evaluate the tool result tokens into the existing KV cache
+    if (!eval_tokens(tokens, g_state.n_past, nullptr, nullptr)) {
+        LOGE("Failed to evaluate tool result tokens");
+        return JNI_FALSE;
+    }
+
+    // Apply grammar constraints for continued tool calling if available
+    if (!g_state.tools_json.empty() && !tmpl_result.grammar.empty()) {
+        g_state.sampling_params.grammar = common_grammar(COMMON_GRAMMAR_TYPE_TOOL_CALLS, tmpl_result.grammar);
+        g_state.sampling_params.grammar_lazy = tmpl_result.grammar_lazy;
+        g_state.sampling_params.grammar_triggers = tmpl_result.grammar_triggers;
+        for (auto & tok_str : tmpl_result.preserved_tokens) {
+            auto ids = tokenize_string(tok_str, false);
+            for (auto id : ids) {
+                g_state.sampling_params.preserved_tokens.insert(id);
+            }
+        }
+    }
+
+    rebuild_sampler();
+
+    LOGI("Tool result injected successfully, n_past=%d", g_state.n_past);
+    return JNI_TRUE;
+}
+
+// ---- Resume Generation (after tool result injection) ----
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeResumeGeneration(
+        JNIEnv * env, jobject, jint maxTokens, jobject callback) {
+
+    std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+
+    if (!g_state.model || !g_state.ctx) {
+        LOGE("Model not loaded");
+        return JNI_FALSE;
+    }
+
+    g_state.cancel_flag = false;
+    g_utf8_buffer.clear();
+
+    if (!ensure_callback_methods(env, callback)) {
+        LOGE("Failed to find callback methods");
+        return JNI_FALSE;
+    }
+
+    if (!g_state.sampler) rebuild_sampler();
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+    int n_generated = 0;
+    std::string generated_text;
+    generated_text.reserve(maxTokens * 4);
+    size_t sent_count = 0;
+
+    antiprompt_state antiprompt;
+    antiprompt.set_stops(COMMON_STOP_STRINGS);
+
+    token_batcher batcher(env, callback, g_onToken);
+
+    LOGI("Resuming generation from n_past=%d", g_state.n_past);
+
+    while (n_generated < maxTokens && !g_state.cancel_flag.load()) {
+        if (!g_state.sampler) break;
+
+        llama_token id = common_sampler_sample(g_state.sampler, g_state.ctx, -1);
+        common_sampler_accept(g_state.sampler, id, true);
+
+        if (llama_vocab_is_eog(vocab, id)) break;
+
+        char buf[256];
+        int n = llama_token_to_piece(vocab, id, buf, sizeof(buf) - 1, 0, true);
+        if (n > 0) {
+            buf[n] = '\0';
+            generated_text.append(buf, n);
+
+            size_t unsent_start = std::min(sent_count, generated_text.size());
+            std::string unsent(generated_text.data() + unsent_start, generated_text.size() - unsent_start);
+
+            size_t stop_pos = antiprompt.find_stop(unsent, (size_t)n, STOP_FULL);
+            if (stop_pos != std::string::npos) {
+                generated_text.resize(unsent_start + stop_pos);
+                if (sent_count < generated_text.size()) {
+                    batcher.add(generated_text.data() + sent_count, generated_text.size() - sent_count);
+                }
+                batcher.flush();
+                break;
+            }
+
+            stop_pos = antiprompt.find_stop(unsent, (size_t)n, STOP_PARTIAL);
+            if (stop_pos == std::string::npos) {
+                if (sent_count < generated_text.size()) {
+                    batcher.add(generated_text.data() + sent_count, generated_text.size() - sent_count);
+                    sent_count = generated_text.size();
+                }
+            }
+
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        }
+
+        if (g_state.n_past >= (int)llama_n_ctx(g_state.ctx) - 1) {
+            if (!try_context_shift()) break;
+        }
+
+        llama_batch & sb = get_single_batch();
+        common_batch_clear(sb);
+        common_batch_add(sb, id, g_state.n_past, {0}, true);
+        if (llama_decode(g_state.ctx, sb) != 0) break;
+        g_state.n_past++;
+        n_generated++;
+    }
+
+    // Flush remaining
+    if (sent_count < generated_text.size()) {
+        batcher.add(generated_text.data() + sent_count, generated_text.size() - sent_count);
+    }
+    batcher.flush();
+    if (!g_utf8_buffer.empty()) {
+        batcher.buf = std::move(g_utf8_buffer);
+        g_utf8_buffer.clear();
+        batcher.flush();
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+
+    // Check for tool calls in resumed output
+    if (g_onToolCall && !g_state.tools_json.empty() && g_state.chat_templates) {
+        try {
+            common_chat_parser_params parser_params;
+            auto parsed = common_chat_parse(generated_text, false, parser_params);
+            for (auto & tc : parsed.tool_calls) {
+                json wrapped;
+                wrapped["name"] = tc.name;
+                try { wrapped["arguments"] = json::parse(tc.arguments); }
+                catch (...) { wrapped["arguments"] = tc.arguments; }
+                std::string wrapped_str = wrapped.dump();
+                jstring jname = safe_new_string_utf(env, tc.name.c_str());
+                jstring jargs = safe_new_string_utf(env, wrapped_str.c_str());
+                env->CallVoidMethod(callback, g_onToolCall, jname, jargs);
+                env->DeleteLocalRef(jname);
+                env->DeleteLocalRef(jargs);
+                LOGI("Resumed generation tool call: %s", tc.name.c_str());
+            }
+        } catch (...) {}
+    }
+
+    float gen_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
+    float tps = gen_ms > 0 ? (n_generated / (gen_ms / 1000.0f)) : 0;
+
+    if (g_onMetrics) {
+        env->CallVoidMethod(callback, g_onMetrics,
+            tps, 0.0f, gen_ms, 0, n_generated, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    env->CallVoidMethod(callback, g_onDone);
+    LOGI("Resumed generation complete: %d tokens, %.1f t/s", n_generated, tps);
+
+    return JNI_TRUE;
 }
 
 // ---- Dynamic RAM Swapping ----
@@ -3197,7 +3880,6 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativePurgeModelRAM(
         return JNI_FALSE;
     }
     LOGI("Purging model active RAM mappings via madvise...");
-    // Tell the kernel we don't need the pages right now (swaps out to disk/purges cache)
     #ifdef MADV_DONTNEED
     LOGI("purged pages safely using MADV_DONTNEED");
     #endif
@@ -3213,8 +3895,7 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeReloadModelRAM(
         return JNI_FALSE;
     }
     LOGI("Eagerly reloading purged model pages into active RAM (fault-in pass)...");
-    
-    // Run warm-up pass
+
     const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
     llama_token bos = llama_vocab_bos(vocab);
     if (bos != LLAMA_TOKEN_NULL) {
@@ -3235,19 +3916,19 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeApplySlidingWindow(
         JNIEnv * env, jobject, jint windowSize) {
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
     if (!g_state.ctx) return JNI_FALSE;
-    
+
     llama_memory_t mem = llama_get_memory(g_state.ctx);
     if (mem && g_state.n_past > windowSize) {
         int evict_count = g_state.n_past - windowSize;
         LOGI("Evicting %d oldest tokens from KV cache sequence (sliding window size %d)", evict_count, windowSize);
-        
+
         int keep_start = g_state.n_system_tokens;
         int evict_start = keep_start;
         int evict_end = keep_start + evict_count;
-        
+
         llama_memory_seq_rm(mem, 0, evict_start, evict_end);
         llama_memory_seq_add(mem, 0, evict_end, g_state.n_past, -evict_count);
-        
+
         g_state.n_past -= evict_count;
         LOGI("KV cache shift complete. New active context size: %d tokens", g_state.n_past);
         return JNI_TRUE;
@@ -3259,16 +3940,16 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeRagRerank(
         JNIEnv * env, jobject, jstring jquery, jobjectArray jdocs) {
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
-    
+
     jsize num_docs = env->GetArrayLength(jdocs);
     LOGI("Running on-device Cross-Encoder re-ranking for %d retrieved documents", num_docs);
-    
+
     json arr = json::array();
     for (int i = 0; i < num_docs; i++) {
-        float score = 1.0f - ((float)i / (float)num_docs) * 0.5f; 
+        float score = 1.0f - ((float)i / (float)num_docs) * 0.5f;
         arr.push_back(score);
     }
-    
+
     std::string json_str = arr.dump();
     return env->NewStringUTF(json_str.c_str());
 }

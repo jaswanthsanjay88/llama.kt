@@ -148,6 +148,22 @@ class GGMLEngine {
      */
     fun supportsThinking(): Boolean = loaded && GGUFNativeLib.nativeSupportsThinking()
 
+    /**
+     * Check if the loaded model supports vision input (requires mmproj loaded).
+     */
+    fun supportsVision(): Boolean = loaded && GGUFNativeLib.nativeSupportsVision()
+
+    /**
+     * Check if the loaded model supports audio input (requires audio mmproj loaded).
+     */
+    fun supportsAudio(): Boolean = loaded && GGUFNativeLib.nativeSupportsAudio()
+
+    /**
+     * Get vision model metadata as JSON string.
+     * Contains: supports_vision, supports_audio, uses_mrope, default_marker.
+     */
+    fun getVisionInfo(): String? = if (loaded) GGUFNativeLib.nativeGetVisionInfo() else null
+
     // ---- Sampling Configuration ----
 
     /**
@@ -318,6 +334,40 @@ class GGMLEngine {
 
     fun isToolCallingSupported(): Boolean = loaded && GGUFNativeLib.nativeIsToolCallingSupported()
 
+    /**
+     * Inject a tool execution result into the native KV cache context.
+     * This inserts a tool-role message and evaluates it, allowing the model
+     * to continue generation with the tool result in context.
+     *
+     * @param toolCallId Unique identifier for this tool call
+     * @param toolName Name of the tool that was executed
+     * @param resultJson Serialized result content
+     * @return true if injection succeeded
+     */
+    fun injectToolResult(toolCallId: String, toolName: String, resultJson: String): Boolean =
+        loaded && GGUFNativeLib.nativeInjectToolResult(toolCallId, toolName, resultJson)
+
+    /**
+     * Resume generation after injecting tool results.
+     * Continues autoregressive decoding from the current KV cache position.
+     */
+    fun resumeGenerationFlow(maxTokens: Int = 4096): Flow<GenerationEvent> = callbackFlow {
+        val job = launch(Dispatchers.IO) {
+            val cb = object : StreamCallback {
+                override fun onToken(token: String) { trySend(GenerationEvent.Token(token)) }
+                override fun onToolCall(name: String, argsJson: String) { trySend(GenerationEvent.ToolCall(name, argsJson)) }
+                override fun onDone() { trySend(GenerationEvent.Done); channel.close() }
+                override fun onError(message: String) { trySend(GenerationEvent.Error(message)); channel.close() }
+                override fun onProgress(progress: Float) { trySend(GenerationEvent.Progress(progress)) }
+                override fun onMetrics(tps: Float, ttftMs: Float, totalMs: Float, tokensEvaluated: Int, tokensPredicted: Int, modelMB: Float, ctxMB: Float, peakMB: Float, memPct: Float) {
+                    trySend(GenerationEvent.Metrics(DecodingMetrics(tps, ttftMs, totalMs, tokensEvaluated, tokensPredicted, modelMB, ctxMB, peakMB, memPct)))
+                }
+            }
+            GGUFNativeLib.nativeResumeGeneration(maxTokens, cb)
+        }
+        awaitClose { job.cancel(); GGUFNativeLib.nativeStopGeneration() }
+    }
+
     // ---- Control Vectors ----
 
     /**
@@ -382,6 +432,18 @@ class GGMLEngine {
         }
     }
 
+    // ---- Multimodal Audio (whisper) ----
+
+    fun loadAudioModel(audioPath: String): Boolean {
+        return loaded && GGUFNativeLib.nativeLoadAudioModel(audioPath)
+    }
+
+    fun unloadAudioModel() {
+        if (loaded) {
+            GGUFNativeLib.nativeReleaseAudioModel()
+        }
+    }
+
     fun generateFlowWithImage(prompt: String, imageBytes: ByteArray, maxTokens: Int = 4096): Flow<GenerationEvent> = callbackFlow {
         val job = launch(Dispatchers.IO) {
             val cb = object : StreamCallback {
@@ -395,6 +457,35 @@ class GGMLEngine {
                 }
             }
             GGUFNativeLib.nativeGenerateStreamWithImage(prompt, imageBytes, maxTokens, cb)
+        }
+        awaitClose { job.cancel(); GGUFNativeLib.nativeStopGeneration() }
+    }
+
+    /**
+     * Multimodal streaming generation with audio input.
+     * @param prompt Text prompt (audio content is referenced by marker)
+     * @param audioBytes Raw audio file bytes (WAV, MP3, FLAC)
+     * @param sampleRate Audio sample rate in Hz
+     * @param maxTokens Maximum tokens to generate
+     */
+    fun generateFlowWithAudio(
+        prompt: String,
+        audioBytes: ByteArray,
+        sampleRate: Int = 16000,
+        maxTokens: Int = 4096,
+    ): Flow<GenerationEvent> = callbackFlow {
+        val job = launch(Dispatchers.IO) {
+            val cb = object : StreamCallback {
+                override fun onToken(token: String) { trySend(GenerationEvent.Token(token)) }
+                override fun onToolCall(name: String, argsJson: String) { trySend(GenerationEvent.ToolCall(name, argsJson)) }
+                override fun onDone() { trySend(GenerationEvent.Done); channel.close() }
+                override fun onError(message: String) { trySend(GenerationEvent.Error(message)); channel.close() }
+                override fun onProgress(progress: Float) { trySend(GenerationEvent.Progress(progress)) }
+                override fun onMetrics(tps: Float, ttftMs: Float, totalMs: Float, tokensEvaluated: Int, tokensPredicted: Int, modelMB: Float, ctxMB: Float, peakMB: Float, memPct: Float) {
+                    trySend(GenerationEvent.Metrics(DecodingMetrics(tps, ttftMs, totalMs, tokensEvaluated, tokensPredicted, modelMB, ctxMB, peakMB, memPct)))
+                }
+            }
+            GGUFNativeLib.nativeGenerateStreamWithAudio(prompt, audioBytes, sampleRate, maxTokens, cb)
         }
         awaitClose { job.cancel(); GGUFNativeLib.nativeStopGeneration() }
     }

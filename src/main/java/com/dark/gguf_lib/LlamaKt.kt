@@ -79,6 +79,11 @@ class LlamaKt private constructor(
             engine.loadVisionModel(it)
         }
 
+        // Load audio model if configured
+        config.audioModelPath?.let {
+            engine.loadAudioModel(it)
+        }
+
         // Load draft model if configured
         config.draftModelPath?.let {
             engine.loadDraftModel(it, config.draftModelThreads)
@@ -127,6 +132,12 @@ class LlamaKt private constructor(
     /** Whether the engine is loaded and ready. */
     val isReady: Boolean get() = initialized && engine.isLoaded
 
+    /** Check if the loaded model supports vision input. */
+    val supportsVision: Boolean get() = engine.supportsVision()
+
+    /** Check if the loaded model supports audio input. */
+    val supportsAudio: Boolean get() = engine.supportsAudio()
+
     /** Get typed model information. */
     fun modelInfo(): ModelInfo? {
         ensureInitialized()
@@ -145,6 +156,19 @@ class LlamaKt private constructor(
     fun chatWithImage(prompt: String, imageBytes: ByteArray, maxTokens: Int = 4096): Flow<GenerationEvent> {
         ensureInitialized()
         return engine.generateFlowWithImage(prompt, imageBytes, maxTokens)
+    }
+
+    /**
+     * Multimodal generation — stream response for text prompt + audio input.
+     */
+    fun chatWithAudio(
+        prompt: String,
+        audioBytes: ByteArray,
+        sampleRate: Int = 16000,
+        maxTokens: Int = 4096,
+    ): Flow<GenerationEvent> {
+        ensureInitialized()
+        return engine.generateFlowWithAudio(prompt, audioBytes, sampleRate, maxTokens)
     }
 
     /**
@@ -203,6 +227,7 @@ class LlamaKt private constructor(
     override fun close() {
         if (initialized) {
             engine.unloadVisionModel()
+            engine.unloadAudioModel()
             engine.unloadDraftModel()
             engine.unload()
             initialized = false
@@ -241,6 +266,11 @@ class LlamaKt private constructor(
         }
 
         val job = launch(Dispatchers.IO) {
+            var round = 0
+            val maxRounds = config.toolConfig.maxRounds
+            var hasPendingToolCalls = false
+            val pendingToolCalls = mutableListOf<Pair<String, String>>()
+
             val cb = object : StreamCallback {
                 override fun onToken(token: String) {
                     trySend(GenerationEvent.Token(token))
@@ -248,22 +278,12 @@ class LlamaKt private constructor(
 
                 override fun onToolCall(name: String, argsJson: String) {
                     trySend(GenerationEvent.ToolCall(name, argsJson))
-                    
-                    // 1. Execute tool via annotation reflection
-                    val result = toolExecutor.execute(name, argsJson)
-                    
-                    // 2. Feed tool result back to the model context automatically
-                    launch {
-                        val toolResponsePrompt = "Tool $name returned: $result"
-                        engine.generateFlow(toolResponsePrompt, maxTokens).collect { event ->
-                            trySend(event)
-                        }
-                    }
+                    pendingToolCalls.add(Pair(name, argsJson))
+                    hasPendingToolCalls = true
                 }
 
                 override fun onDone() {
-                    trySend(GenerationEvent.Done)
-                    channel.close()
+                    // Handled inside our control loop
                 }
 
                 override fun onError(message: String) {
@@ -285,7 +305,67 @@ class LlamaKt private constructor(
                     ))
                 }
             }
-            GGUFNativeLib.nativeGenerateStream(prompt, maxTokens, cb)
+
+            // Start initial generation
+            var success = GGUFNativeLib.nativeGenerateStream(prompt, maxTokens, cb)
+            if (!success) {
+                trySend(GenerationEvent.Error("Initial generation failed"))
+                channel.close()
+                return@launch
+            }
+
+            // Multi-round native agentic tool execution loop
+            while (hasPendingToolCalls && round < maxRounds) {
+                round++
+                hasPendingToolCalls = false
+                
+                val currentToolCalls = ArrayList(pendingToolCalls)
+                pendingToolCalls.clear()
+
+                for (toolCall in currentToolCalls) {
+                    val toolName = toolCall.first
+                    val argsJson = toolCall.second
+
+                    // Generate a unique ID for this tool call
+                    val toolCallId = "call_${System.currentTimeMillis()}_${(0..999).random()}"
+
+                    // Execute tool via annotation reflection
+                    val startTime = System.currentTimeMillis()
+                    var resultStr = ""
+                    try {
+                        resultStr = toolExecutor.execute(toolName, argsJson) ?: ""
+                    } catch (e: Exception) {
+                        resultStr = "Error executing tool: ${e.message}"
+                    }
+                    val durationMs = System.currentTimeMillis() - startTime
+
+                    // Emit ToolResult event
+                    trySend(GenerationEvent.ToolResult(toolCallId, toolName, resultStr))
+
+                    // Inject the result natively
+                    val injected = engine.injectToolResult(toolCallId, toolName, resultStr)
+                    if (!injected) {
+                        trySend(GenerationEvent.Error("Failed to inject tool result natively for $toolName"))
+                        channel.close()
+                        return@launch
+                    }
+                }
+
+                // Resume generation from the updated KV cache position
+                success = GGUFNativeLib.nativeResumeGeneration(maxTokens, cb)
+                if (!success) {
+                    trySend(GenerationEvent.Error("Resumed generation failed in round $round"))
+                    channel.close()
+                    return@launch
+                }
+            }
+
+            if (hasPendingToolCalls) {
+                trySend(GenerationEvent.Error("Exceeded maximum tool calling rounds ($maxRounds)"))
+            } else {
+                trySend(GenerationEvent.Done)
+            }
+            channel.close()
         }
 
         awaitClose { 
@@ -362,6 +442,7 @@ class LlamaKt private constructor(
         var speculativeNgram: Int = 4,
         var promptCacheDir: String? = null,
         var visionModelPath: String? = null,
+        var audioModelPath: String? = null,
         var draftModelPath: String? = null,
         var draftModelThreads: Int = 0,
     )
@@ -380,6 +461,7 @@ class LlamaKt private constructor(
         fun chatTemplate(template: String) { config.chatTemplate = template }
         fun promptCacheDir(dir: String) { config.promptCacheDir = dir }
         fun visionModel(path: String) { config.visionModelPath = path }
+        fun audioModel(path: String) { config.audioModelPath = path }
         fun draftModel(path: String, threads: Int = 0) { config.draftModelPath = path; config.draftModelThreads = threads }
 
         fun sampling(block: SamplingBuilder.() -> Unit) {
