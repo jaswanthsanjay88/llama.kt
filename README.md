@@ -61,7 +61,7 @@ Run Large Language Models — Llama 3, Phi-3, Gemma, Mistral, Qwen, and more —
 
 ---
 
-## Key Upgrades (Parity with LiteRT-LM)
+## Key Upgrades 
 
 ### 1. Hardware Acceleration (NPU, APU and GPU Offloading)
 Bypasses CPU processing limits by compiling tensor instructions to dedicated accelerators:
