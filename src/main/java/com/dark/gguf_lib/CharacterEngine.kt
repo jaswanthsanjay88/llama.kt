@@ -42,6 +42,8 @@ class CharacterEngine(private val engine: GGMLEngine) {
             put("creativity", personality.creativity)
             put("verbosity", personality.verbosity)
             put("formality", personality.formality)
+            if (personality.topK != -1) put("topK", personality.topK)
+            if (personality.minP != -1.0f) put("minP", personality.minP)
         }
         GGUFNativeLib.nativeSetPersonality(json.toString())
     }
@@ -97,6 +99,32 @@ class CharacterEngine(private val engine: GGMLEngine) {
         biases.forEach { (token, bias) -> json.put(token, bias) }
         GGUFNativeLib.nativeSetLogitBias(json.toString())
     }
+
+    fun setCustomMood(tempMod: Float, topPMod: Float, repPenaltyMod: Float) {
+        GGUFNativeLib.nativeSetMood(Mood.CUSTOM.ordinal)
+    }
+
+    fun buildPrompt(userPrompt: String): String {
+        val ctx = getContext()
+        return if (ctx.isNotEmpty()) {
+            "$ctx\n\n$userPrompt"
+        } else {
+            userPrompt
+        }
+    }
+
+    fun calcVectors(prompt: String, onProgress: ((Float) -> Unit)? = null): FloatArray? {
+        return null
+    }
+
+    fun applyVectors(data: FloatArray, strength: Float = 1.0f, ilStart: Int = -1, ilEnd: Int = -1): Boolean {
+        return false
+    }
+
+    fun clearVectors(): Boolean {
+        engine.clearControlVector()
+        return true
+    }
 }
 
 // ---- Data classes ----
@@ -114,6 +142,8 @@ data class Personality(
     val creativity: Float = 0.5f,
     val verbosity: Float = 0.5f,
     val formality: Float = 0.5f,
+    val topK: Int = -1,
+    val minP: Float = -1.0f,
 )
 
 data class ControlVectorConfig(

@@ -1032,11 +1032,13 @@ static void save_prompt_cache(const std::string & system_prompt,
 
 // JNI: nativeLoadModel
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
-        JNIEnv * env, jobject,
-        jstring jpath, jint nCtx, jint nThreads,
-        jboolean flashAttn, jint backend, jstring jCacheTypeK, jstring jCacheTypeV) {
+static jboolean load_model_shared(
+        JNIEnv * env,
+        const char * path,
+        FILE * file_ptr,
+        jint nCtx, jint nThreads,
+        jboolean flashAttn, jint backend,
+        const char * cacheK, const char * cacheV) {
 
     std::lock_guard<std::mutex> lock(g_state.gen_mutex);
 
@@ -1050,11 +1052,11 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
     g_state.prev_prompt_tokens.clear();
     g_state.n_system_tokens = 0;
 
-    const char * path = env->GetStringUTFChars(jpath, nullptr);
-    const char * cacheK = env->GetStringUTFChars(jCacheTypeK, nullptr);
-    const char * cacheV = env->GetStringUTFChars(jCacheTypeV, nullptr);
-
-    LOGI("Loading model: %s (ctx=%d threads=%d flash=%d backend=%d)", path, nCtx, nThreads, flashAttn, backend);
+    if (file_ptr) {
+        LOGI("Loading model from FILE ptr (ctx=%d threads=%d flash=%d backend=%d)", nCtx, nThreads, flashAttn, backend);
+    } else {
+        LOGI("Loading model from path: %s (ctx=%d threads=%d flash=%d backend=%d)", path ? path : "", nCtx, nThreads, flashAttn, backend);
+    }
 
     // Model params
     auto mparams = llama_model_default_params();
@@ -1069,14 +1071,15 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
     }
 
     TRACE_BEGIN("llama_load_model");
-    g_state.model = llama_model_load_from_file(path, mparams);
+    if (file_ptr) {
+        g_state.model = llama_model_load_from_file_ptr(file_ptr, mparams);
+    } else {
+        g_state.model = llama_model_load_from_file(path, mparams);
+    }
     TRACE_END();
-    env->ReleaseStringUTFChars(jpath, path);
 
     if (!g_state.model) {
         LOGE("Failed to load model");
-        env->ReleaseStringUTFChars(jCacheTypeK, cacheK);
-        env->ReleaseStringUTFChars(jCacheTypeV, cacheV);
         return JNI_FALSE;
     }
 
@@ -1103,9 +1106,6 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
 
     cparams.type_k = cache_type_from_string(cacheK);
     cparams.type_v = cache_type_from_string(cacheV);
-
-    env->ReleaseStringUTFChars(jCacheTypeK, cacheK);
-    env->ReleaseStringUTFChars(jCacheTypeV, cacheV);
 
     TRACE_BEGIN("llama_init_context");
     g_state.ctx = llama_init_from_model(g_state.model, cparams);
@@ -1151,6 +1151,25 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
     return JNI_TRUE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
+        JNIEnv * env, jobject,
+        jstring jpath, jint nCtx, jint nThreads,
+        jboolean flashAttn, jint backend, jstring jCacheTypeK, jstring jCacheTypeV) {
+
+    const char * path = env->GetStringUTFChars(jpath, nullptr);
+    const char * cacheK = env->GetStringUTFChars(jCacheTypeK, nullptr);
+    const char * cacheV = env->GetStringUTFChars(jCacheTypeV, nullptr);
+
+    jboolean result = load_model_shared(env, path, nullptr, nCtx, nThreads, flashAttn, backend, cacheK, cacheV);
+
+    env->ReleaseStringUTFChars(jpath, path);
+    env->ReleaseStringUTFChars(jCacheTypeK, cacheK);
+    env->ReleaseStringUTFChars(jCacheTypeV, cacheV);
+
+    return result;
+}
+
 // JNI: nativeLoadModelFromFd
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -1182,16 +1201,23 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModelFromFd(
         return JNI_FALSE;
     }
 
-    // /proc/self/fd/<n> gives llama.cpp a path it can fopen()
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/self/fd/%d", owned_fd);
+    // Create FILE * directly from the file descriptor using fdopen
+    FILE * file_ptr = fdopen(owned_fd, "rb");
+    if (!file_ptr) {
+        LOGE("fdopen failed for fd %d: %s", owned_fd, strerror(errno));
+        close(owned_fd);
+        return JNI_FALSE;
+    }
 
-    jstring jpath = env->NewStringUTF(path);
-    jboolean result = Java_com_dark_gguf_1lib_GGUFNativeLib_nativeLoadModel(
-        env, thiz, jpath, nCtx, nThreads, flashAttn, backend, jCacheTypeK, jCacheTypeV);
-    env->DeleteLocalRef(jpath);
+    const char * cacheK = env->GetStringUTFChars(jCacheTypeK, nullptr);
+    const char * cacheV = env->GetStringUTFChars(jCacheTypeV, nullptr);
 
-    close(owned_fd);
+    jboolean result = load_model_shared(env, nullptr, file_ptr, nCtx, nThreads, flashAttn, backend, cacheK, cacheV);
+
+    env->ReleaseStringUTFChars(jCacheTypeK, cacheK);
+    env->ReleaseStringUTFChars(jCacheTypeV, cacheV);
+
+    fclose(file_ptr); // closes owned_fd too
     return result;
 }
 

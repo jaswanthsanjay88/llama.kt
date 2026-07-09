@@ -389,6 +389,37 @@ class GGMLEngine {
     fun getContextUsage(): Float = if (loaded) GGUFNativeLib.nativeGetContextUsage() else 0f
 
     /**
+     * Get details about the context window state.
+     */
+    fun getContextInfo(prompt: String? = null): ContextInfo {
+        if (!loaded) return ContextInfo(0, 0, 0, -1, -1)
+        val info = getModelInfo()
+        val total = info?.contextLength ?: 4096
+        val usage = getContextUsage()
+        val used = (total * usage).toInt()
+        val remaining = maxOf(0, total - used)
+        val estimate = prompt?.let { p ->
+            p.length / 4
+        } ?: 0
+        val after = used + estimate
+        return ContextInfo(
+            total = total,
+            used = used,
+            remaining = remaining,
+            promptEstimate = estimate,
+            afterPrompt = after
+        )
+    }
+
+    private var thinkingEnabled = true
+
+    fun setThinkingEnabled(enabled: Boolean) {
+        thinkingEnabled = enabled
+    }
+
+    fun isThinkingEnabled(): Boolean = thinkingEnabled
+
+    /**
      * Apply sliding window KV cache eviction.
      * Shrinks context to windowSize by evicting older sequences but keeping system tokens intact.
      */
@@ -421,6 +452,54 @@ class GGMLEngine {
     fun warmUp(): Boolean = if (loaded) GGUFNativeLib.nativeWarmUp() else false
 
     // ---- Multimodal Vision (LLaVA/CLIP) ----
+
+    private var visionLoaded = false
+
+    fun loadVlmProjector(path: String, threads: Int = 0): Boolean {
+        visionLoaded = loadVisionModel(path)
+        return visionLoaded
+    }
+
+    fun loadVlmProjectorFromFd(fd: Int, threads: Int = 0): Boolean {
+        return false
+    }
+
+    fun releaseVlmProjector() {
+        unloadVisionModel()
+        visionLoaded = false
+    }
+
+    val isVlmLoaded: Boolean get() = visionLoaded
+
+    fun getVlmDefaultMarker(): String = "<image>"
+
+    fun generateVlmFlow(
+        messagesJson: String,
+        imageData: List<ByteArray>,
+        maxTokens: Int
+    ): Flow<GenerationEvent> {
+        val prompt = try {
+            val arr = JSONArray(messagesJson)
+            var lastUserContent = ""
+            for (i in arr.length() - 1 downTo 0) {
+                val obj = arr.getJSONObject(i)
+                if (obj.optString("role") == "user") {
+                    lastUserContent = obj.optString("content")
+                    break
+                }
+            }
+            if (lastUserContent.isEmpty() && arr.length() > 0) {
+                arr.getJSONObject(arr.length() - 1).optString("content")
+            } else {
+                lastUserContent
+            }
+        } catch (_: Exception) {
+            messagesJson
+        }
+
+        val imageBytes = imageData.firstOrNull() ?: ByteArray(0)
+        return generateFlowWithImage(prompt, imageBytes, maxTokens)
+    }
 
     fun loadVisionModel(clipPath: String): Boolean {
         return loaded && GGUFNativeLib.nativeLoadVisionModel(clipPath)

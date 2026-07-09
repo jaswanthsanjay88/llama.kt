@@ -61,11 +61,21 @@ set(GGML_SOURCES
     ggml/src/ggml-cpu/binary-ops.cpp
     ggml/src/ggml-cpu/unary-ops.cpp
     ggml/src/ggml-cpu/hbm.cpp
-    
-    # ARM specific CPU optimizations
-    ggml/src/ggml-cpu/arch/arm/quants.c
-    ggml/src/ggml-cpu/arch/arm/repack.cpp
 )
+
+# Architecture specific CPU optimizations
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+    list(APPEND GGML_SOURCES
+        ggml/src/ggml-cpu/arch/arm/quants.c
+        ggml/src/ggml-cpu/arch/arm/repack.cpp
+    )
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "i686" OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64")
+    list(APPEND GGML_SOURCES
+        ggml/src/ggml-cpu/arch/x86/quants.c
+        ggml/src/ggml-cpu/arch/x86/repack.cpp
+        ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp
+    )
+endif()
 
 if(GGML_VULKAN)
     list(APPEND GGML_SOURCES ggml/src/ggml-vulkan/ggml-vulkan.cpp)

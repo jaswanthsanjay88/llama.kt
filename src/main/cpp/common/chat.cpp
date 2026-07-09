@@ -2468,7 +2468,20 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         LOG_DBG("%s: generated parser:\n%s\n\nparser generation prompt: %s\n", __func__, arena.dump(arena.root()).c_str(), auto_params.generation_prompt.c_str());
         return auto_params;
     } catch (const std::exception & e) {
-        throw std::invalid_argument(std::string("Unable to generate parser for this template. Automatic parser generation failed: ") + e.what());
+        LOG_WRN("Automatic template parser generation failed: %s. Falling back to pure content template.", e.what());
+        
+        common_chat_params data;
+        auto params_copy               = params;
+        params_copy.reasoning_format   = COMMON_REASONING_FORMAT_NONE;
+        data.prompt                    = common_chat_template_direct_apply_impl(tmpl, params_copy);
+        data.generation_prompt         = common_chat_template_generation_prompt_impl(tmpl, params);
+        data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
+        
+        auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
+            return p.literal(data.generation_prompt) << p.content(p.rest());
+        });
+        data.parser                    = parser.save();
+        return data;
     }
 }
 

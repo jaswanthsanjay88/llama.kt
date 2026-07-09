@@ -83,7 +83,7 @@ class AnnotatedToolExecutor {
             val argsObj = JSONObject(argsJson)
             val method = tool.method
             val params = method.parameters
-            val argValues = Array(params.size) { i ->
+            val argValues = Array<Any?>(params.size) { i ->
                 val param = params[i]
                 val name = param.name
                 

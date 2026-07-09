@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 #include <new>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -145,13 +146,22 @@ int32_t rag_engine_load_model(rag_engine_t * engine, const char * path) {
 int32_t rag_engine_load_model_from_fd(rag_engine_t * engine, int fd) {
     if (!engine || fd < 0) return -1;
 
-    char fd_path[64];
-    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+    int owned_fd = dup(fd);
+    if (owned_fd < 0) {
+        return -1;
+    }
+
+    FILE * file_ptr = fdopen(owned_fd, "rb");
+    if (!file_ptr) {
+        close(owned_fd);
+        return -1;
+    }
 
     auto model_params = llama_model_default_params();
     model_params.use_mmap = true;
-    llama_model * model = llama_model_load_from_file(fd_path, model_params);
+    llama_model * model = llama_model_load_from_file_ptr(file_ptr, model_params);
 
+    fclose(file_ptr); // closes owned_fd too
     return rag_load_model_impl(engine, model);
 }
 
