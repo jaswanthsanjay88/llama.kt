@@ -354,6 +354,35 @@ static const std::vector<std::string> COMMON_STOP_STRINGS = {
     "<eos>",
 };
 
+static std::string detect_prefilled_think_tag(const std::string & prompt) {
+    size_t len = prompt.length();
+    if (len < 5) return "";
+    
+    size_t i = len - 1;
+    while (i > 0 && (prompt[i] == ' ' || prompt[i] == '\t' || prompt[i] == '\r' || prompt[i] == '\n')) {
+        i--;
+    }
+    
+    // Check <think> (7 chars)
+    if (i >= 6 && prompt.compare(i - 6, 7, "<think>") == 0) {
+        return "<think>";
+    }
+    // Check <reasoning> (11 chars)
+    if (i >= 10 && prompt.compare(i - 10, 11, "<reasoning>") == 0) {
+        return "<reasoning>";
+    }
+    // Check [THINK] (7 chars)
+    if (i >= 6 && prompt.compare(i - 6, 7, "[THINK]") == 0) {
+        return "[THINK]";
+    }
+    // Check <|channel>thought (17 chars)
+    if (i >= 16 && prompt.compare(i - 16, 17, "<|channel>thought") == 0) {
+        return "<|channel>thought";
+    }
+    
+    return "";
+}
+
 // Helper: Apply chat template to build prompt + stop sequences
 
 struct chat_template_result {
@@ -1426,6 +1455,12 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStream(
 
     token_batcher batcher(env, callback, g_onToken);
 
+    std::string prefilled_tag = detect_prefilled_think_tag(tmpl_result.prompt);
+    if (!prefilled_tag.empty()) {
+        batcher.add(prefilled_tag.data(), prefilled_tag.size());
+        batcher.flush();
+    }
+
     while (n_generated < maxTokens && !g_state.cancel_flag.load()) {
         if (!g_state.sampler) break;
 
@@ -1790,6 +1825,12 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGenerateStreamMultiTurn(
     if (g_state.speculative_enabled) g_state.gen_history.clear();
 
     token_batcher batcher(env, callback, g_onToken);
+
+    std::string prefilled_tag = detect_prefilled_think_tag(tmpl_result.prompt);
+    if (!prefilled_tag.empty()) {
+        batcher.add(prefilled_tag.data(), prefilled_tag.size());
+        batcher.flush();
+    }
 
     while (n_generated < maxTokens && !g_state.cancel_flag.load()) {
         if (!g_state.sampler) break;
