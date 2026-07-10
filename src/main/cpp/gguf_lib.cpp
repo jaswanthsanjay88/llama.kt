@@ -1130,6 +1130,7 @@ static jboolean load_model_shared(
 
     // warm-up pass: decode a single token to fault-in hot weight pages.
     // without this, the first real query has high TTFT from page faults.
+    // NOTE: This is optional — if it fails (OOM), we skip it gracefully.
     {
         const llama_vocab * vocab = llama_model_get_vocab(g_state.model);
         llama_token bos = llama_vocab_bos(vocab);
@@ -1138,10 +1139,16 @@ static jboolean load_model_shared(
             common_batch_clear(sb);
             common_batch_add(sb, bos, 0, {0}, true);
             TRACE_BEGIN("llama_warmup_decode");
-            llama_decode(g_state.ctx, sb);
+            int rc = llama_decode(g_state.ctx, sb);
             TRACE_END();
-            llama_memory_clear(llama_get_memory(g_state.ctx), true);
-            LOGI("Warm-up pass complete (model pages faulted in)");
+            if (rc == 0) {
+                llama_memory_clear(llama_get_memory(g_state.ctx), true);
+                LOGI("Warm-up pass complete (model pages faulted in)");
+            } else {
+                LOGW("Warm-up decode failed (rc=%d, likely OOM) — skipping, first query will be slower", rc);
+                // Clear any partial KV state from the failed decode
+                llama_memory_clear(llama_get_memory(g_state.ctx), true);
+            }
         }
     }
 

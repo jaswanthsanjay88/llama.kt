@@ -3230,6 +3230,10 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
 
     struct ggml_threadpool * threadpool =
         ggml_aligned_malloc(sizeof(struct ggml_threadpool));
+    if (!threadpool) {
+        GGML_LOG_ERROR("%s: failed to allocate threadpool (%zu bytes)\n", __func__, sizeof(struct ggml_threadpool));
+        return NULL;
+    }
     {
         threadpool->cgraph           = cgraph;
         threadpool->cplan            = cplan;
@@ -3250,6 +3254,11 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
     // Allocate and init workers state
     const size_t workers_size = sizeof(struct ggml_compute_state) * tpp->n_threads;
     struct ggml_compute_state * workers = ggml_aligned_malloc(workers_size);
+    if (!workers) {
+        GGML_LOG_ERROR("%s: failed to allocate workers (%zu bytes)\n", __func__, workers_size);
+        ggml_aligned_free(threadpool, sizeof(struct ggml_threadpool));
+        return NULL;
+    }
 
     memset(workers, 0, workers_size);
     for (int j = 0; j < tpp->n_threads; j++) {
@@ -3318,6 +3327,9 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
 
         struct ggml_threadpool_params ttp = ggml_threadpool_params_default(n_threads);
         threadpool = ggml_threadpool_new_impl(&ttp, cgraph, cplan);
+        if (!threadpool) {
+            return GGML_STATUS_ALLOC_FAILED;
+        }
     } else {
         // Reset some of the parameters that need resetting
         // No worker threads should be accessing the parameters below at this stage
