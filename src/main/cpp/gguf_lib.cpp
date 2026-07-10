@@ -370,8 +370,8 @@ struct chat_template_result {
 static chat_template_result apply_chat_template(const std::vector<common_chat_msg> & messages, bool add_generation_prompt = true) {
     chat_template_result out;
 
-    if (!g_state.chat_templates) {
-        // Fallback: simple concatenation
+    auto get_fallback_result = [&messages, add_generation_prompt]() {
+        chat_template_result fallback_out;
         std::string prompt;
         for (auto & msg : messages) {
             if (msg.role == "system") {
@@ -387,81 +387,92 @@ static chat_template_result apply_chat_template(const std::vector<common_chat_ms
         if (add_generation_prompt) {
             prompt += "Assistant:";
         }
-        out.prompt = prompt;
-        out.stops = {"\nUser:", "\nuser:", "\n\nUser:"};
-        // Add common EOS strings as safety net
-        out.stops.insert(out.stops.end(), COMMON_STOP_STRINGS.begin(), COMMON_STOP_STRINGS.end());
-        return out;
+        fallback_out.prompt = prompt;
+        fallback_out.stops = {"\nUser:", "\nuser:", "\n\nUser:"};
+        fallback_out.stops.insert(fallback_out.stops.end(), COMMON_STOP_STRINGS.begin(), COMMON_STOP_STRINGS.end());
+        return fallback_out;
+    };
+
+    if (!g_state.chat_templates) {
+        return get_fallback_result();
     }
 
-    common_chat_templates_inputs inputs;
-    inputs.messages = messages;
-    inputs.add_generation_prompt = add_generation_prompt;
-    inputs.use_jinja = true;
+    try {
+        common_chat_templates_inputs inputs;
+        inputs.messages = messages;
+        inputs.add_generation_prompt = add_generation_prompt;
+        inputs.use_jinja = true;
 
-    // Add tools if configured
-    if (!g_state.tools_json.empty()) {
-        try {
-            auto tools_j = json::parse(g_state.tools_json);
-            inputs.tools = common_chat_tools_parse_oaicompat(tools_j);
-            if (g_state.grammar_mode == 0) {
-                inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
-            } else {
-                inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
-            }
-        } catch (...) {
-            LOGW("Failed to parse tools JSON for template");
-        }
-    }
-
-    auto result = common_chat_templates_apply(g_state.chat_templates.get(), inputs);
-    out.prompt = result.prompt;
-    out.format = result.format;
-    out.grammar = result.grammar;
-    out.grammar_lazy = result.grammar_lazy;
-    out.grammar_triggers = result.grammar_triggers;
-    out.preserved_tokens = result.preserved_tokens;
-
-    // If the template returned CONTENT_ONLY even though tools are configured,
-    // the model's template doesn't natively support tools.
-    // Inject our ToolManager's tool description as a fallback via prompt engineering.
-    if (out.format == COMMON_CHAT_FORMAT_CONTENT_ONLY &&
-        !g_state.tools_json.empty() && g_state.tool_mgr) {
-        char * tool_prompt = tool_manager_get_prompt(g_state.tool_mgr);
-        if (tool_prompt && tool_prompt[0]) {
-            // Rebuild prompt with tool descriptions injected into the system message
-            std::vector<common_chat_msg> augmented = messages;
-            bool found_system = false;
-            for (auto & m : augmented) {
-                if (m.role == "system") {
-                    m.content += "\n\n" + std::string(tool_prompt);
-                    found_system = true;
-                    break;
+        // Add tools if configured
+        if (!g_state.tools_json.empty()) {
+            try {
+                auto tools_j = json::parse(g_state.tools_json);
+                inputs.tools = common_chat_tools_parse_oaicompat(tools_j);
+                if (g_state.grammar_mode == 0) {
+                    inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+                } else {
+                    inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
                 }
+            } catch (...) {
+                LOGW("Failed to parse tools JSON for template");
             }
-            if (!found_system) {
-                augmented.insert(augmented.begin(), {"system", std::string(tool_prompt)});
-            }
-
-            // Re-apply template with augmented messages (no tools this time, we handle it via prompt)
-            common_chat_templates_inputs aug_inputs;
-            aug_inputs.messages = augmented;
-            aug_inputs.add_generation_prompt = add_generation_prompt;
-            aug_inputs.use_jinja = true;
-            auto aug_result = common_chat_templates_apply(g_state.chat_templates.get(), aug_inputs);
-            out.prompt = aug_result.prompt;
-            LOGI("ToolManager prompt injected (model template doesn't support tools natively)");
         }
-        tool_manager_free_string(tool_prompt);
+
+        auto result = common_chat_templates_apply(g_state.chat_templates.get(), inputs);
+        out.prompt = result.prompt;
+        out.format = result.format;
+        out.grammar = result.grammar;
+        out.grammar_lazy = result.grammar_lazy;
+        out.grammar_triggers = result.grammar_triggers;
+        out.preserved_tokens = result.preserved_tokens;
+
+        // If the template returned CONTENT_ONLY even though tools are configured,
+        // the model's template doesn't natively support tools.
+        // Inject our ToolManager's tool description as a fallback via prompt engineering.
+        if (out.format == COMMON_CHAT_FORMAT_CONTENT_ONLY &&
+            !g_state.tools_json.empty() && g_state.tool_mgr) {
+            char * tool_prompt = tool_manager_get_prompt(g_state.tool_mgr);
+            if (tool_prompt && tool_prompt[0]) {
+                // Rebuild prompt with tool descriptions injected into the system message
+                std::vector<common_chat_msg> augmented = messages;
+                bool found_system = false;
+                for (auto & m : augmented) {
+                    if (m.role == "system") {
+                        m.content += "\n\n" + std::string(tool_prompt);
+                        found_system = true;
+                        break;
+                    }
+                }
+                if (!found_system) {
+                    augmented.insert(augmented.begin(), {"system", std::string(tool_prompt)});
+                }
+
+                // Re-apply template with augmented messages (no tools this time, we handle it via prompt)
+                common_chat_templates_inputs aug_inputs;
+                aug_inputs.messages = augmented;
+                aug_inputs.add_generation_prompt = add_generation_prompt;
+                aug_inputs.use_jinja = true;
+                auto aug_result = common_chat_templates_apply(g_state.chat_templates.get(), aug_inputs);
+                out.prompt = aug_result.prompt;
+                LOGI("ToolManager prompt injected (model template doesn't support tools natively)");
+            }
+            tool_manager_free_string(tool_prompt);
+        }
+
+        // Collect stop sequences from template
+        out.stops = result.additional_stops;
+
+        // Always add common EOS strings as safety net (like ChatterUI)
+        out.stops.insert(out.stops.end(), COMMON_STOP_STRINGS.begin(), COMMON_STOP_STRINGS.end());
+
+        LOGI("Template applied: format=%d, %zu stop sequences", (int)out.format, out.stops.size());
+    } catch (const std::exception & e) {
+        LOGE("Failed to apply chat template: %s. Falling back to simple concatenation.", e.what());
+        return get_fallback_result();
+    } catch (...) {
+        LOGE("Unknown exception while applying chat template. Falling back to simple concatenation.");
+        return get_fallback_result();
     }
-
-    // Collect stop sequences from template
-    out.stops = result.additional_stops;
-
-    // Always add common EOS strings as safety net (like ChatterUI)
-    out.stops.insert(out.stops.end(), COMMON_STOP_STRINGS.begin(), COMMON_STOP_STRINGS.end());
-
-    LOGI("Template applied: format=%d, %zu stop sequences", (int)out.format, out.stops.size());
     return out;
 }
 
