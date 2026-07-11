@@ -87,7 +87,7 @@ set(PDFIUM_DIR     ${RAG_INGEST_DIR}/third_party/pdfium)
 
 add_library(pdfium SHARED IMPORTED)
 set_target_properties(pdfium PROPERTIES
-    IMPORTED_LOCATION ${PDFIUM_DIR}/${ANDROID_ABI}/libpdfium.so)
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libpdfium.so)
 
 set(MINIZ_SOURCES ${RAG_INGEST_DIR}/third_party/miniz/miniz.c)
 set_source_files_properties(${MINIZ_SOURCES} PROPERTIES LANGUAGE C)

@@ -66,3 +66,12 @@
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,RuntimeVisibleAnnotations
 
 -dontwarn com.dark.gguf_lib.GGUFNativeLib
+
+# Keep rules for newly added/restored classes and packages in update
+-keep class com.dark.gguf_lib.ContextInfo { *; }
+-keep class com.dark.gguf_lib.CharacterEngine { *; }
+-keep enum com.dark.gguf_lib.Mood { *; }
+-keep class com.dark.gguf_lib.Personality { *; }
+-keep class com.dark.gguf_lib.ControlVectorConfig { *; }
+-keep class com.dark.gguf_lib.toolcalling.** { *; }
+
