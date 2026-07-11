@@ -1,5 +1,6 @@
 plugins {
     id("com.android.library")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -8,28 +9,35 @@ android {
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 29
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17")
-                arguments("-DANDROID_STL=c++_shared")
+                arguments("-DANDROID_STL=c++_shared",
+                          "-DLLAMA_BUILD_TESTS=OFF",
+                          "-DLLAMA_BUILD_EXAMPLES=OFF",
+                          "-DLLAMA_BUILD_TOOLS=OFF",
+                          "-DLLAMA_BUILD_SERVER=OFF",
+                          "-Wno-deprecated",
+                          "-Wno-dev")
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
             }
-        }
-        ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
+                "proguard-rules.pro",
+                "consumer-rules.pro"
             )
+        }
+        debug {
+            isMinifyEnabled = false
         }
     }
     externalNativeBuild {
@@ -42,20 +50,15 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        buildConfig = false
+    }
 }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.google.android.material:material:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-common-java8:2.7.0")
-    
-    // JSON library for JNI communication
-    implementation("com.google.code.gson:gson:2.10.1")
-    
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }

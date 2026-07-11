@@ -10,6 +10,7 @@ build/
 
 # Native build artifacts
 *.so
+!src/main/jniLibs/**/*.so
 *.a
 *.o
 *.d

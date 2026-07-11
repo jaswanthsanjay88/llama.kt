@@ -5,36 +5,43 @@ package com.dark.gguf_lib.models
  * Emitted through Flow-based generation APIs.
  */
 sealed class GenerationEvent {
-    /** A new token of generated text. */
     data class Token(val text: String) : GenerationEvent()
-
-    /** The model invoked a tool/function call. */
-    data class ToolCall(val name: String, val argsJson: String) : GenerationEvent()
-
-    /** The result from executing a tool, fed back for continued generation. */
-    data class ToolResult(val callId: String, val name: String, val result: String) : GenerationEvent()
-
-    /** Generation completed successfully. */
     data object Done : GenerationEvent()
-
-    /** An error occurred during generation. */
     data class Error(val message: String) : GenerationEvent()
-
-    /** Performance metrics from the generation pass. */
     data class Metrics(val metrics: DecodingMetrics) : GenerationEvent()
-
-    /** Prompt evaluation progress (0.0 to 1.0). */
     data class Progress(val progress: Float) : GenerationEvent()
 
     /**
-     * Thinking/reasoning block from models that support chain-of-thought.
-     * Contains the model's internal reasoning before producing the final answer.
+     * VLM prompt-eval stage timings. Emitted once per VLM generate call, after
+     * the image has been encoded and decoded but before the first generated token.
+     *
+     * - [vlmEncodeMs]: vision/audio encoder wall time
+     * - [vlmDecodeMs]: llama_decode wall time for image embeddings + interleaved text
+     * - [imageTokens]: number of image embedding tokens fed into the LLM
      */
-    data class ThinkingBlock(val thought: String) : GenerationEvent()
+    data class VlmStageMetrics(
+        val vlmEncodeMs: Float,
+        val vlmDecodeMs: Float,
+        val imageTokens: Int
+    ) : GenerationEvent()
 
     /**
-     * Partial token accumulation — useful for UI rendering with partial words.
-     * Contains the accumulated text so far (not just the new token).
+     * VT (vision token) cache result for a single image. Fired once per image
+     * when a cache key was supplied. On hit, the ~10s ViT pass is skipped.
      */
-    data class PartialResponse(val accumulatedText: String) : GenerationEvent()
+    data class VtCacheStatus(
+        val hit: Boolean,
+        val nTokens: Int,
+        val nEmbd: Int,
+    ) : GenerationEvent()
+
+    /**
+     * VLM-KV cache result. Fired once per VLM call when a vlmKvKey was
+     * supplied. On hit, BOTH the ViT pass AND the ~9s LLM image-prefill are
+     * skipped — TTFT drops from ~10s to a few hundred ms.
+     */
+    data class VlmKvCacheStatus(
+        val hit: Boolean,
+        val nTokens: Int,
+    ) : GenerationEvent()
 }

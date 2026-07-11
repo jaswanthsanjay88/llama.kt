@@ -1,35 +1,24 @@
-# llama.kt ProGuard Rules
-# Keep JNI native methods (called via reflection from native code)
--keepclasseswithmembernames class * {
-    native <methods>;
+# Library ProGuard rules for com.dark.gguf_lib.
+# Applied when building the library itself with minification enabled.
+# Consumer rules in consumer-rules.pro are automatically merged in.
+
+# Crash-report friendly: keep source filenames + line numbers.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,RuntimeVisibleAnnotations
+
+-dontwarn kotlin.Unit
+-dontwarn kotlin.**
+
+# Coroutines: keep flow infrastructure; don't blanket-keep all of kotlinx.coroutines.
+-keep class kotlinx.coroutines.flow.** { *; }
+-keepclassmembers class * {
+    @kotlinx.coroutines.** *;
 }
+-dontwarn kotlinx.coroutines.**
 
-# Keep the GGUFNativeLib singleton and all its native declarations
--keep class com.dark.gguf_lib.GGUFNativeLib { *; }
+# callbackFlow lambdas extend ProducerScope subclasses; preserve their members.
+-keepclassmembers class * extends kotlinx.coroutines.channels.ProducerScope { *; }
 
-# Keep callback interfaces (instantiated from native code via JNI)
--keep class com.dark.gguf_lib.models.StreamCallback { *; }
--keep class com.dark.gguf_lib.models.EmbeddingCallback { *; }
--keep class com.dark.gguf_lib.models.EmbeddingResult { *; }
--keep class com.dark.gguf_lib.models.DecodingMetrics { *; }
-
-# Keep all public API classes
--keep class com.dark.gguf_lib.GGMLEngine { *; }
--keep class com.dark.gguf_lib.LlamaKt { *; }
--keep class com.dark.gguf_lib.LlamaKt$* { *; }
--keep class com.dark.gguf_lib.ConversationManager { *; }
--keep class com.dark.gguf_lib.CharacterEngine { *; }
--keep class com.dark.gguf_lib.EmbeddingEngine { *; }
--keep class com.dark.gguf_lib.RAGEngine { *; }
--keep class com.dark.gguf_lib.ToolManager { *; }
--keep class com.dark.gguf_lib.LifecycleAwareEngine { *; }
-
-# Keep data classes used in public API
--keep class com.dark.gguf_lib.models.** { *; }
--keep class com.dark.gguf_lib.toolcalling.** { *; }
-
-# Keep enums
--keepclassmembers enum * {
-    public static **[] values();
-    public static ** valueOf(java.lang.String);
-}
+-ignorewarnings
