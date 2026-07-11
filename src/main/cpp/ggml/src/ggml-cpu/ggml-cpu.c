@@ -2683,8 +2683,8 @@ void ggml_threadpool_free(struct ggml_threadpool* threadpool) {
 
     ggml_mutex_lock(&threadpool->mutex);
 
-    threadpool->stop = true;
-    threadpool->pause = false;
+    atomic_store_explicit(&threadpool->stop, true, memory_order_relaxed);
+    atomic_store_explicit(&threadpool->pause, false, memory_order_relaxed);
 
     ggml_cond_broadcast(&threadpool->cond);
     ggml_mutex_unlock(&threadpool->mutex);
@@ -2708,13 +2708,13 @@ void ggml_threadpool_free(struct ggml_threadpool* threadpool) {
 // pause/resume must be called under mutex
 static void ggml_threadpool_pause_locked(struct ggml_threadpool * threadpool) {
     GGML_PRINT_DEBUG("Pausing threadpool\n");
-    threadpool->pause = true;
+    atomic_store_explicit(&threadpool->pause, true, memory_order_relaxed);
     ggml_cond_broadcast(&threadpool->cond);
 }
 
 static void ggml_threadpool_resume_locked(struct ggml_threadpool * threadpool) {
     GGML_PRINT_DEBUG("Resuming threadpool\n");
-    threadpool->pause = false;
+    atomic_store_explicit(&threadpool->pause, false, memory_order_relaxed);
     ggml_cond_broadcast(&threadpool->cond);
 }
 #endif
@@ -3237,8 +3237,8 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
     {
         threadpool->cgraph           = cgraph;
         threadpool->cplan            = cplan;
-        threadpool->pause            = tpp->paused;
-        threadpool->abort            = -1;
+        atomic_store_explicit(&threadpool->pause, tpp->paused, memory_order_relaxed);
+        atomic_store_explicit(&threadpool->abort, -1, memory_order_relaxed);
         threadpool->n_threads        = tpp->n_threads;
         threadpool->poll             = tpp->poll;
         threadpool->prio             = tpp->prio;
@@ -3329,8 +3329,8 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         // No worker threads should be accessing the parameters below at this stage
         threadpool->cgraph           = cgraph;
         threadpool->cplan            = cplan;
-        threadpool->current_chunk    = 0;
-        threadpool->abort            = -1;
+        atomic_store_explicit(&threadpool->current_chunk, 0, memory_order_relaxed);
+        atomic_store_explicit(&threadpool->abort, -1, memory_order_relaxed);
         threadpool->ec               = GGML_STATUS_SUCCESS;
     }
 
