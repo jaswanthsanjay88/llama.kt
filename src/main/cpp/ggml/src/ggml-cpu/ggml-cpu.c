@@ -469,14 +469,19 @@ typedef pthread_mutex_t    ggml_mutex_t;
 
 // Threadpool def
 struct ggml_threadpool {
+    struct ggml_cgraph * cgraph;
+    struct ggml_cplan  * cplan;
+    atomic_int n_graph;       // updated when there is work to be done (i.e each graph) holds graph and active thread counts.
+    atomic_int  abort;        // Used for aborting processing of a graph
+    int          n_threads;   // Number of threads in the pool
+    int32_t      prio;        // Scheduling priority
+    uint32_t     poll;        // Polling level (0 - no polling)
+    enum ggml_status ec;
+
     ggml_mutex_t mutex;       // mutex for cond.var
     ggml_cond_t  cond;        // cond.var for waiting for new work
 
-    struct ggml_cgraph * cgraph;
-    struct ggml_cplan  * cplan;
-
     // synchronization primitives
-    atomic_int n_graph;       // updated when there is work to be done (i.e each graph) holds graph and active thread counts.
     atomic_int GGML_CACHE_ALIGN n_barrier;
     atomic_int GGML_CACHE_ALIGN n_barrier_passed;
     atomic_int GGML_CACHE_ALIGN current_chunk; // currently processing chunk during Mat_Mul, shared between all the threads.
@@ -484,14 +489,8 @@ struct ggml_threadpool {
     // these are atomic as an annotation for thread-sanitizer
     atomic_bool stop;         // Used for stopping the threadpool altogether
     atomic_bool pause;        // Used for pausing the threadpool or individual threads
-    atomic_int  abort;        // Used for aborting processing of a graph
 
     struct ggml_compute_state * workers;   // per thread state
-    int          n_threads;   // Number of threads in the pool
-    int32_t      prio;        // Scheduling priority
-    uint32_t     poll;        // Polling level (0 - no polling)
-
-    enum ggml_status ec;
 };
 
 // Per-thread state
@@ -3234,17 +3233,12 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
         GGML_LOG_ERROR("%s: failed to allocate threadpool (%zu bytes)\n", __func__, sizeof(struct ggml_threadpool));
         return NULL;
     }
+    memset(threadpool, 0, sizeof(struct ggml_threadpool));
     {
         threadpool->cgraph           = cgraph;
         threadpool->cplan            = cplan;
-        threadpool->n_graph          = 0;
-        threadpool->n_barrier        = 0;
-        threadpool->n_barrier_passed = 0;
-        threadpool->current_chunk    = 0;
-        threadpool->stop             = false;
         threadpool->pause            = tpp->paused;
         threadpool->abort            = -1;
-        threadpool->workers          = NULL;
         threadpool->n_threads        = tpp->n_threads;
         threadpool->poll             = tpp->poll;
         threadpool->prio             = tpp->prio;
