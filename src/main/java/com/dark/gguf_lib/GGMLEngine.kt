@@ -369,6 +369,22 @@ class GGMLEngine {
      */
     fun setLogitBias(biasJson: String) = GGUFNativeLib.nativeSetLogitBias(biasJson)
 
+    /**
+     * Set a GBNF grammar to constrain sampling.
+     *
+     * @param gbnf The GBNF grammar string.
+     */
+    fun setGrammar(gbnf: String) {
+        GGUFNativeLib.nativeSetGrammar(gbnf)
+    }
+
+    /**
+     * Clear the current GBNF grammar constraint.
+     */
+    fun clearGrammar() {
+        GGUFNativeLib.nativeClearGrammar()
+    }
+
     /** Set the system prompt prepended to every chat. */
     fun setSystemPrompt(prompt: String) = GGUFNativeLib.nativeSetSystemPrompt(prompt)
 

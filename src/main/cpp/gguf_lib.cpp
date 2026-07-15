@@ -2160,6 +2160,28 @@ Java_com_dark_gguf_1lib_GGUFNativeLib_nativeSetLogitBias(
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeSetGrammar(
+        JNIEnv * env, jobject, jstring jgrammar) {
+    std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+    if (!jgrammar) {
+        g_state.sampling_params.grammar.clear();
+    } else {
+        const char * grammar_cstr = env->GetStringUTFChars(jgrammar, nullptr);
+        g_state.sampling_params.grammar = grammar_cstr;
+        env->ReleaseStringUTFChars(jgrammar, grammar_cstr);
+    }
+    g_sampler_needs_rebuild = true;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dark_gguf_1lib_GGUFNativeLib_nativeClearGrammar(
+        JNIEnv * env, jobject) {
+    std::lock_guard<std::mutex> lock(g_state.gen_mutex);
+    g_state.sampling_params.grammar.clear();
+    g_sampler_needs_rebuild = true;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_dark_gguf_1lib_GGUFNativeLib_nativeGetStateSize(JNIEnv *, jobject) {
     if (!g_state.ctx) return 0;
