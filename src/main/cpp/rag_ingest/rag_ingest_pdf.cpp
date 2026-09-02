@@ -1,4 +1,5 @@
 ﻿#include "rag_ingest.h"
+#include <string>
 
 int rag_ingest_extract_pdf(const uint8_t* data, size_t size, std::string& out) {
     (void)data;
