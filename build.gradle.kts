@@ -63,21 +63,7 @@ android {
     }
 }
 
-val pdfiumNatives by configurations.creating
-
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    
-    // PDFium native binaries from JitPack dependency
-    pdfiumNatives("com.github.jaswanthsanjay88.bit-dependencies:pdfium_libs:1.1.0@zip")
-}
-
-val extractPdfium by tasks.registering(Copy::class) {
-    from(pdfiumNatives.map { zipTree(it) })
-    into(file("src/main/jniLibs"))
-}
-
-tasks.named("preBuild") {
-    dependsOn(extractPdfium)
 }
