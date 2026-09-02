@@ -132,7 +132,9 @@ set(RAG_INGEST_SOURCES
 set(TEXT_DIGEST_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/text_digest)
 set(TEXT_DIGEST_SOURCES ${TEXT_DIGEST_DIR}/text_digest.cpp)
 
-set(VLM_DIR ${LLAMA_DIR}/engine/vlm)
+set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engine)
+set(VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
+set(VLM_DIR    ${ENGINE_DIR}/vlm)
 set(VLM_SOURCES
     ${VLM_DIR}/clip.cpp
     ${VLM_DIR}/mtmd.cpp
@@ -161,12 +163,12 @@ set(VLM_SOURCES
 add_library(${CMAKE_PROJECT_NAME} SHARED
     gguf_lib.cpp
     error_tracker.cpp
-    ${LLAMA_DIR}/engine/tn-log.cpp
-    ${LLAMA_DIR}/engine/thread-engine.cpp
-    ${LLAMA_DIR}/engine/power-engine.cpp
-    ${LLAMA_DIR}/engine/rag-engine.cpp
-    ${LLAMA_DIR}/engine/vt_cache.cpp
-    ${LLAMA_DIR}/engine/vlm_kv_cache.cpp
+    ${ENGINE_DIR}/tn-log.cpp
+    ${ENGINE_DIR}/thread-engine.cpp
+    ${ENGINE_DIR}/power-engine.cpp
+    ${ENGINE_DIR}/rag-engine.cpp
+    ${ENGINE_DIR}/vt_cache.cpp
+    ${ENGINE_DIR}/vlm_kv_cache.cpp
     ${RAG_INGEST_SOURCES}
     ${TEXT_DIGEST_SOURCES}
     ${VLM_SOURCES})
@@ -175,9 +177,9 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${LLAMA_DIR}/include
     ${LLAMA_DIR}/common
     ${LLAMA_DIR}/ggml/include
-    ${LLAMA_DIR}/vendor
-    ${LLAMA_DIR}/engine
-    ${LLAMA_DIR}/engine/vlm
+    ${VENDOR_DIR}
+    ${ENGINE_DIR}
+    ${VLM_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${RAG_INGEST_DIR}
     ${TEXT_DIGEST_DIR}

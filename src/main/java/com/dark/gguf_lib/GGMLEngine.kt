@@ -392,13 +392,32 @@ class GGMLEngine {
     /** Override the model's chat template (advanced — usually not needed). */
     fun setChatTemplate(template: String) = GGUFNativeLib.nativeSetChatTemplate(template)
 
+    fun generateStreamDirect(
+        prompt: String,
+        maxTokens: Int = 1024,
+        onToken: (String) -> Unit,
+        onDone: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val cb = object : StreamCallback {
+            override fun onToken(token: String) { onToken(token) }
+            override fun onDone() { onDone() }
+            override fun onError(message: String) { onError(message) }
+            override fun onProgress(progress: Float) {}
+            override fun onMetrics(
+                tps: Float, ttftMs: Float, totalMs: Float,
+                tokensEvaluated: Int, tokensPredicted: Int,
+                modelMB: Float, ctxMB: Float, peakMB: Float, memPct: Float,
+            ) {}
+            override fun onVlmStageMetrics(vlmEncodeMs: Float, vlmDecodeMs: Float, imageTokens: Int) {}
+            override fun onVlmCacheStatus(hit: Boolean, nTokens: Int, nEmbd: Int) {}
+            override fun onVlmKvCacheStatus(hit: Boolean, nTokens: Int) {}
+        }
+        GGUFNativeLib.nativeGenerateStream(prompt, maxTokens, cb)
+    }
+
     /**
      * Single-turn streaming generation as a [Flow] of [GenerationEvent].
-     *
-     * The flow emits [GenerationEvent.Token] chunks during decode, optionally
-     * [GenerationEvent.Progress] / [GenerationEvent.Metrics] /
-     * [GenerationEvent.Error], and terminates with [GenerationEvent.Done].
-     * Cancelling the collector calls [stopGeneration] on the native side.
      */
     fun generateFlow(prompt: String, maxTokens: Int = 4096): Flow<GenerationEvent> = callbackFlow {
         val cb = streamCallback(::trySend, ::close)
@@ -413,10 +432,6 @@ class GGMLEngine {
 
     /**
      * Multi-turn streaming generation. Same event model as [generateFlow].
-     *
-     * @param messagesJson JSON array of `{role, content}` objects. Roles:
-     *                     `system`, `user`, `assistant`. Anything else
-     *                     is remapped to `assistant` on the native side.
      */
     fun generateMultiTurnFlow(messagesJson: String, maxTokens: Int = 4096): Flow<GenerationEvent> = callbackFlow {
         val cb = streamCallback(::trySend, ::close)

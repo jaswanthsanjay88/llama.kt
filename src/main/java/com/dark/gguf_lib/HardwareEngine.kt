@@ -78,7 +78,7 @@ object HardwareEngine {
     // ── Heuristics ─────────────────────────────────────────────────────────
 
     private fun JSONArray.toNameList(): List<String> =
-        (0 until length()).mapNotNull { optJSONObject(it)?.optString("name", null) }
+        (0 until length()).mapNotNull { optJSONObject(it)?.optString("name")?.takeIf { s -> s.isNotEmpty() } }
 
     /**
      * Vendor is parsed from device description, not from a vendor ID — the
