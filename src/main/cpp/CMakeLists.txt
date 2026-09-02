@@ -87,19 +87,6 @@ else()
     set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
 endif()
 
-# --gc-sections          strip unreferenced functions/data
-# --icf=safe             merge identical code (only when addresses aren't taken)
-# -z,max-page-size=16384 16KB page size support for Android 15+
-add_link_options(
-    -Wl,--gc-sections
-    -Wl,--icf=safe
-    -Wl,-Bsymbolic
-    -Wl,--exclude-libs,ALL
-    -Wl,-z,max-page-size=16384
-    -Wl,--build-id=none
-)
-add_link_options($<$<NOT:$<CONFIG:Debug>>:-flto=thin>)
-
 # ── Reproducible build: override git-derived values with fixed strings ──
 # llama.cpp's cmake/build-info.cmake and cmake/git-vars.cmake run git commands
 # that embed commit hashes, dates, and counts into the binary. These differ
@@ -111,6 +98,21 @@ set(GIT_DATE           ""        CACHE STRING "" FORCE)
 set(GIT_COMMIT_SUBJECT ""        CACHE STRING "" FORCE)
 
 add_subdirectory(${LLAMA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama)
+
+if (TARGET llama-common)
+    set_target_properties(llama-common PROPERTIES
+        CXX_VISIBILITY_PRESET default
+        C_VISIBILITY_PRESET default
+        VISIBILITY_INLINES_HIDDEN OFF
+    )
+endif()
+if (TARGET llama-common-base)
+    set_target_properties(llama-common-base PROPERTIES
+        CXX_VISIBILITY_PRESET default
+        C_VISIBILITY_PRESET default
+        VISIBILITY_INLINES_HIDDEN OFF
+    )
+endif()
 
 set(RAG_INGEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rag_ingest)
 set(PDFIUM_DIR     ${RAG_INGEST_DIR}/third_party/pdfium)
@@ -195,3 +197,11 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     pdfium
     android
     log)
+
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    -Wl,--gc-sections
+    -Wl,--icf=safe
+    -Wl,-z,max-page-size=16384
+    -Wl,--build-id=none
+    $<$<NOT:$<CONFIG:Debug>>:-flto=thin>
+)
