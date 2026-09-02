@@ -27,7 +27,7 @@ android {
                           "-DGGML_LLAMAFILE=OFF",
                           "-Wno-deprecated",
                           "-Wno-dev")
-                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+                abiFilters.add("arm64-v8a")
             }
         }
     }
